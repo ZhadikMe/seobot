@@ -126,9 +126,9 @@ def fix_translations(site_dir: str, langs: list, groq_api_key: str):
     translate_script = os.path.join(site_dir, 'scripts', 'translate.py')
     if not os.path.exists(translate_script):
         # Copy our translate.py into the site
-        our_script = os.path.join(os.path.dirname(__file__), '..', 'loricarson', 'site', 'scripts', 'translate.py')
+        our_script = os.path.join(os.path.dirname(__file__), 'translate.py')
         if not os.path.exists(our_script):
-            raise FileNotFoundError('translate.py not found')
+            raise FileNotFoundError('translate.py not found in bot directory')
         import shutil
         os.makedirs(os.path.join(site_dir, 'scripts'), exist_ok=True)
         shutil.copy(our_script, translate_script)
