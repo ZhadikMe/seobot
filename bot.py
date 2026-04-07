@@ -447,9 +447,14 @@ async def run_fixes(message: Message, state: FSMContext):
     files_before = await loop.run_in_executor(None, _snapshot_files, site_dir)
 
     steps = [
-        ('📝 Исправляю title и description...', 'fix_descriptions'),
-        ('🗂️ Добавляю Schema.org (BreadcrumbList, FAQ)...', 'fix_schema'),
+        ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
+        ('📝 Генерирую уникальные descriptions...', 'fix_descriptions'),
+        ('🗂️ Добавляю Schema.org (BreadcrumbList)...', 'fix_schema'),
+        ('🖼️ Добавляю OG images...', 'fix_og_image'),
+        ('🚫 Добавляю nofollow на внешние ссылки...', 'fix_nofollow'),
+        ('🤖 Генерирую robots.txt...', 'fix_robots_txt'),
         ('🌍 Запускаю переводы...', 'fix_translations'),
+        ('🌐 Добавляю hreflang на переведённые страницы...', 'fix_hreflang_translated'),
         ('🔗 Исправляю lang switcher...', 'fix_lang_switcher'),
     ]
 
