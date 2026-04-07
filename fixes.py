@@ -17,7 +17,9 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
                   site_domain: str = None) -> dict:
     """Dispatcher — runs a specific fix step."""
     try:
-        if step_key == 'fix_descriptions':
+        if step_key == 'fix_archive_scripts':
+            fix_archive_scripts(site_dir)
+        elif step_key == 'fix_descriptions':
             fix_descriptions(site_dir, groq_api_key)
         elif step_key == 'fix_schema':
             fix_schema(site_dir, site_domain)
@@ -38,6 +40,51 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
         return {'ok': True}
     except Exception as e:
         return {'ok': False, 'error': str(e)}
+
+
+def fix_archive_scripts(site_dir: str):
+    """
+    Remove web.archive.org injected scripts and styles from all HTML files.
+    Handles sites stored as-is (site/ dir) that weren't processed by detector.py.
+    """
+    ARCHIVE_SCRIPT_PATTERNS = [
+        # Bundle playback and wombat scripts
+        r'<script[^>]*web-static\.archive\.org[^>]*>.*?</script>',
+        r'<script[^>]*web-static\.archive\.org[^>]*/?>',
+        # Archive CSS injections
+        r'<link[^>]*web-static\.archive\.org[^>]*/?>',
+        # __wm.init / __wm.wombat inline blocks
+        r'<script[^>]*>\s*__wm\.(init|wombat)\(.*?</script>',
+        # Wayback toolbar
+        r'<!-- BEGIN WAYBACK TOOLBAR INSERT -->.*?<!-- END WAYBACK TOOLBAR INSERT -->',
+    ]
+
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            with open(fpath, encoding='utf-8', errors='ignore') as f:
+                html = f.read()
+
+            if 'archive.org' not in html:
+                continue
+
+            original = html
+            for pattern in ARCHIVE_SCRIPT_PATTERNS:
+                html = re.sub(pattern, '', html, flags=re.DOTALL | re.IGNORECASE)
+
+            # Also fix archive URLs left in href/src attributes
+            html = re.sub(
+                r'(?:https?://web\.archive\.org)?/web/\d{14}[a-z_]*/https?://([^\s"\'<>]+)',
+                lambda m: 'https://' + m.group(1),
+                html
+            )
+
+            if html != original:
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    f.write(html)
 
 
 def fix_descriptions(site_dir: str, groq_api_key: str = None):

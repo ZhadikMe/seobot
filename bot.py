@@ -493,6 +493,7 @@ async def handle_confirm(callback: CallbackQuery, state: FSMContext):
 
 async def run_fixes(message: Message, state: FSMContext):
     """Run all SEO fixes and create PR."""
+    global _processing_user_id
     data = await state.get_data()
     tmp_dir   = data['tmp_dir']
     site_dir  = data.get('site_dir', tmp_dir)
@@ -504,6 +505,7 @@ async def run_fixes(message: Message, state: FSMContext):
     loop = asyncio.get_event_loop()
 
     steps = [
+        ('🧹 Очищаю archive.org скрипты...', 'fix_archive_scripts'),
         ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
         ('📝 Генерирую уникальные descriptions...', 'fix_descriptions'),
         ('🗂️ Добавляю Schema.org (BreadcrumbList)...', 'fix_schema'),
