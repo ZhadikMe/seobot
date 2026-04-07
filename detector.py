@@ -12,20 +12,25 @@ def detect_and_normalize(repo_dir: str) -> tuple[str, str]:
     """
     Detect repo structure, normalize to site_dir.
     Returns: (site_dir, description)
-    """
-    # 1. web.archive.org dump
-    archive_dir = os.path.join(repo_dir, 'web.archive.org')
-    if os.path.isdir(archive_dir):
-        site_dir = os.path.join(repo_dir, 'site')
-        desc = restore_from_archive(archive_dir, site_dir)
-        return site_dir, desc
 
-    # 2. Already has site/ with HTML files
+    Priority:
+    1. site/ already has HTML (previously processed) → use as-is, skip re-extraction
+    2. web.archive.org dump exists but site/ is empty/missing → extract from archive
+    3. HTML files in repo root
+    """
     site_dir = os.path.join(repo_dir, 'site')
+    archive_dir = os.path.join(repo_dir, 'web.archive.org')
+
+    # 1. site/ already populated — use it directly (respects previous fixes/translations)
     if os.path.isdir(site_dir):
         html_count = len(glob.glob(os.path.join(site_dir, '**', '*.html'), recursive=True))
         if html_count > 0:
             return site_dir, f'Готовый сайт в site/ ({html_count} HTML файлов)'
+
+    # 2. web.archive.org dump — first run, site/ is empty or missing
+    if os.path.isdir(archive_dir):
+        desc = restore_from_archive(archive_dir, site_dir)
+        return site_dir, desc
 
     # 3. HTML files in root
     root_html = glob.glob(os.path.join(repo_dir, '*.html'))

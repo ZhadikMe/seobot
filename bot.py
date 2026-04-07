@@ -570,8 +570,13 @@ async def create_pull_request(
     # Skip extensions that are too large or irrelevant for the site
     SKIP_EXTENSIONS = {'.zip', '.tar', '.gz', '.rar', '.7z', '.mp4', '.mp3', '.mov', '.avi'}
 
+    def _git_blob_sha(data: bytes) -> str:
+        import hashlib
+        header = f'blob {len(data)}\0'.encode()
+        return hashlib.sha1(header + data).hexdigest()
+
     try:
-        import base64
+        import base64, hashlib
         from datetime import datetime
         from github import Github, InputGitTreeElement
 
@@ -580,7 +585,15 @@ async def create_pull_request(
         base_branch = gh_repo.default_branch
         base_commit = gh_repo.get_branch(base_branch).commit
 
-        # Upload every file from site_dir — no comparison, no skipping
+        # Fetch existing tree SHAs — skip files whose content is already identical
+        try:
+            full_tree = gh_repo.get_git_tree(base_commit.commit.tree.sha, recursive=True)
+            existing_shas = {item.path: item.sha for item in full_tree.tree if item.type == 'blob'}
+            log.info(f'Repo has {len(existing_shas)} existing files')
+        except Exception as e:
+            log.warning(f'Could not fetch repo tree: {e}')
+            existing_shas = {}
+
         tree_elements = []
         skipped = 0
         for root, dirs, files in os.walk(site_dir):
@@ -591,13 +604,15 @@ async def create_pull_request(
                     skipped += 1
                     continue
                 fpath = os.path.join(root, fname)
-                # Path relative to repo root (site/ prefix preserved)
                 rel_in_repo = os.path.relpath(fpath, tmp_dir).replace(os.sep, '/')
                 try:
                     content = Path(fpath).read_bytes()
-                    # Skip files >5MB (GitHub API limit is 100MB but large files slow things down)
                     if len(content) > 5 * 1024 * 1024:
                         log.warning(f'Skipping large file: {rel_in_repo} ({len(content)//1024}KB)')
+                        skipped += 1
+                        continue
+                    # Skip if GitHub already has identical content (saves API calls + time)
+                    if existing_shas.get(rel_in_repo) == _git_blob_sha(content):
                         skipped += 1
                         continue
                     blob = gh_repo.create_git_blob(
@@ -610,7 +625,7 @@ async def create_pull_request(
                     log.warning(f'Skipping {rel_in_repo}: {e}')
                     skipped += 1
 
-        log.info(f'PR: {len(tree_elements)} files to upload, {skipped} skipped')
+        log.info(f'PR: {len(tree_elements)} changed files, {skipped} unchanged/skipped')
 
         if not tree_elements:
             log.info('No changed files — skipping PR')
