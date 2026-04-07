@@ -92,12 +92,17 @@ async def cmd_cancel(message: Message, state: FSMContext):
     await message.answer('❌ Отменено.')
 
 
+def token_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text='⏭️ Пропустить (публичный репо)', callback_data='token:skip'),
+    ]])
+
+
 @dp.message(F.text.regexp(r'https?://github\.com/'))
 async def got_repo(message: Message, state: FSMContext):
     """Accept GitHub URL in any state — auto-reset if needed."""
     url = message.text.strip().rstrip('/')
     log.info(f'got_repo: url={url!r}')
-    # Validate GitHub URL
     m = re.match(r'https?://github\.com/([^/]+/[^/]+?)(?:\.git)?$', url)
     if not m:
         await message.answer('⚠️ Не похоже на GitHub ссылку. Пример:\n`https://github.com/user/repo`',
@@ -105,14 +110,58 @@ async def got_repo(message: Message, state: FSMContext):
         return
 
     repo_slug = m.group(1)
-    await state.update_data(repo_url=url, repo_slug=repo_slug, selected_langs={'ru', 'de', 'fr', 'es'})
+    await state.update_data(repo_url=url, repo_slug=repo_slug, selected_langs={'ru', 'de', 'fr', 'es'},
+                            user_github_token=GITHUB_TOKEN)
     await message.answer(
         f'✅ Репозиторий: `{repo_slug}`\n\n'
-        '🌍 Выбери языки для перевода:',
+        '🔑 Отправь GitHub токен (`ghp_...`) — нужен для скачивания и создания PR.\n'
+        'Создать: [github.com/settings/tokens](https://github.com/settings/tokens) → Classic → scope `repo`\n\n'
+        '_Сообщение с токеном будет удалено сразу._',
         parse_mode='Markdown',
-        reply_markup=langs_keyboard({'ru', 'de', 'fr', 'es'})
+        reply_markup=token_keyboard()
+    )
+    await state.set_state(SEOFlow.waiting_github_token)
+
+
+@dp.message(SEOFlow.waiting_github_token)
+async def got_github_token(message: Message, state: FSMContext):
+    token = message.text.strip() if message.text else ''
+
+    if not token.startswith('ghp_') and not token.startswith('github_pat_'):
+        await message.answer(
+            '❌ Не похоже на GitHub токен (должен начинаться с `ghp_` или `github_pat_`).\n'
+            'Попробуй ещё раз или нажми «Пропустить».',
+            parse_mode='Markdown',
+            reply_markup=token_keyboard()
+        )
+        return
+
+    # Try to delete message with token for security
+    try:
+        await message.delete()
+    except Exception:
+        await message.answer('⚠️ Не могу удалить сообщение — удали его вручную.')
+
+    await state.update_data(user_github_token=token)
+    data = await state.get_data()
+    await message.answer(
+        '✅ Токен принят.\n\n🌍 Выбери языки для перевода:',
+        reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
     )
     await state.set_state(SEOFlow.waiting_langs)
+
+
+@dp.callback_query(SEOFlow.waiting_github_token, F.data == 'token:skip')
+async def skip_github_token(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    data = await state.get_data()
+    await callback.message.answer(
+        '⏭️ Токен пропущен — PR создать не получится, только аудит.\n\n'
+        '🌍 Выбери языки для перевода:',
+        reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
+    )
+    await state.set_state(SEOFlow.waiting_langs)
+    await callback.answer()
 
 
 @dp.callback_query(SEOFlow.waiting_langs, F.data.startswith('lang:'))
@@ -139,18 +188,17 @@ async def toggle_lang(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-async def download_repo_zip(repo_slug: str, dest_dir: str):
+async def download_repo_zip(repo_slug: str, dest_dir: str, token: str | None = None):
     """Download repo as ZIP from GitHub (async, long timeout) and extract."""
     import zipfile, io, aiohttp
 
     timeout = aiohttp.ClientTimeout(total=300, connect=30)
 
-    # Use GitHub API endpoint — works even when codeload.github.com is blocked by VPN
     zip_url = f'https://api.github.com/repos/{repo_slug}/zipball'
     log.info(f'Downloading ZIP via API: {zip_url}')
     headers = {'Accept': 'application/vnd.github+json'}
-    if GITHUB_TOKEN:
-        headers['Authorization'] = f'Bearer {GITHUB_TOKEN}'
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(zip_url, headers=headers) as resp:
@@ -180,6 +228,7 @@ async def run_audit(message: Message, state: FSMContext):
     repo_url   = data['repo_url']
     repo_slug  = data['repo_slug']
     langs      = sorted(data['selected_langs'])
+    token      = data.get('user_github_token')
 
     status_msg = await message.answer('⏳ Скачиваю репозиторий...')
 
@@ -188,7 +237,7 @@ async def run_audit(message: Message, state: FSMContext):
     await state.update_data(tmp_dir=tmp_dir)
 
     try:
-        await download_repo_zip(repo_slug, tmp_dir)
+        await download_repo_zip(repo_slug, tmp_dir, token=token)
     except Exception as e:
         await bot.edit_message_text(
             text=f'❌ Не удалось скачать репозиторий:\n`{e}`',
@@ -250,45 +299,8 @@ async def handle_confirm(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer('👌 Окей, ничего не изменено.')
         return
 
-    # If no server-side token, ask the user for their GitHub token
-    if not GITHUB_TOKEN:
-        await callback.message.answer(
-            '🔑 Для создания Pull Request нужен GitHub токен.\n\n'
-            'Создай на [github.com/settings/tokens](https://github.com/settings/tokens) '
-            'токен с правами `repo` и отправь его сюда.\n\n'
-            '_Сообщение с токеном будет удалено сразу после получения._',
-            parse_mode='Markdown'
-        )
-        await state.set_state(SEOFlow.waiting_github_token)
-        return
-
     await state.set_state(SEOFlow.processing)
     await run_fixes(callback.message, state)
-
-
-@dp.message(SEOFlow.waiting_github_token)
-async def got_github_token(message: Message, state: FSMContext):
-    token = message.text.strip() if message.text else ''
-
-    if not token.startswith('ghp_') and not token.startswith('github_pat_'):
-        await message.answer(
-            '❌ Не похоже на GitHub токен (должен начинаться с `ghp_` или `github_pat_`).\n'
-            'Попробуй ещё раз.',
-            parse_mode='Markdown'
-        )
-        return
-
-    # Try to delete the message with the token for security
-    try:
-        await message.delete()
-    except Exception:
-        await message.answer(
-            '⚠️ Не могу удалить сообщение — удали его вручную для безопасности.',
-        )
-
-    await state.update_data(user_github_token=token)
-    await state.set_state(SEOFlow.processing)
-    await run_fixes(message, state)
 
 
 def _snapshot_files(site_dir: str) -> dict:
