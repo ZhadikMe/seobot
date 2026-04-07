@@ -77,12 +77,14 @@ def restore_from_archive(archive_dir: str, output_dir: str) -> str:
     js_count = 0
 
     for root, dirs, files in os.walk(site_root):
-        # Skip archive resource dirs
+        # Skip archive resource dirs (timestampXX_ dirs handled separately below)
         dirs[:] = [d for d in dirs if not re.match(r'^\d{14}[a-z_]*$', d)]
+
+        rel_root = os.path.relpath(root, site_root)
+        in_wp_content = rel_root.startswith('wp-content') or rel_root.startswith('wp-includes')
 
         for fname in files:
             src_path = os.path.join(root, fname)
-            # Compute relative path from site_root
             rel = os.path.relpath(src_path, site_root)
             dest_path = os.path.join(output_dir, rel)
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
@@ -99,6 +101,9 @@ def restore_from_archive(archive_dir: str, output_dir: str) -> str:
             elif _is_image(fname):
                 shutil.copy2(src_path, dest_path)
                 img_count += 1
+            elif in_wp_content:
+                # Copy everything inside wp-content/wp-includes (fonts, woff, json, etc.)
+                shutil.copy2(src_path, dest_path)
 
     # Copy CSS, images, JS from timestampXX_ resource dirs
     web_dir = os.path.dirname(snapshot_dir)
@@ -182,13 +187,26 @@ def _copy_and_fix_html(src: str, dest: str, timestamp: str, site_domain: str | N
         shutil.copy2(src, dest)
         return
 
-    # Remove web.archive toolbar injection
+    # Remove all web.archive.org injected content
+    # 1. Toolbar block
     html = re.sub(
         r'<!-- BEGIN WAYBACK TOOLBAR INSERT -->.*?<!-- END WAYBACK TOOLBAR INSERT -->',
         '', html, flags=re.DOTALL
     )
-    html = re.sub(r'<script[^>]*src="[^"]*web\.archive\.org[^"]*"[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+    # 2. External scripts from web-static.archive.org (bundle-playback, wombat, ruffle, etc.)
+    html = re.sub(r'<script[^>]*src="[^"]*(?:web-static\.archive\.org|web\.archive\.org)[^"]*"[^>]*/?>',
+                  '', html, flags=re.DOTALL)
+    html = re.sub(r'<script[^>]*src="[^"]*(?:web-static\.archive\.org|web\.archive\.org)[^"]*"[^>]*>.*?</script>',
+                  '', html, flags=re.DOTALL)
+    # 3. Archive CSS links (banner-styles, iconochive)
+    html = re.sub(r'<link[^>]*href="[^"]*(?:web-static\.archive\.org|web\.archive\.org)[^"]*"[^>]*/?>',
+                  '', html, flags=re.DOTALL)
+    # 4. Inline __wm.init / __wm.wombat blocks
+    html = re.sub(r'<script[^>]*>\s*__wm\.\w+\(.*?</script>', '', html, flags=re.DOTALL)
+    # 5. RufflePlayer
     html = re.sub(r'<script[^>]*>\s*window\.RufflePlayer.*?</script>', '', html, flags=re.DOTALL)
+    # 6. Wayback rewrite comment markers
+    html = re.sub(r'<!--\s*(?:End Wayback Rewrite JS Include|Wayback[^-]*?)-->', '', html)
 
     # Fix archive URLs in all forms:
     # - https://web.archive.org/web/TIMESTAMP.../https://domain/path

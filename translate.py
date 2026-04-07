@@ -127,13 +127,13 @@ def extract_translatable(html):
     add(r'<meta\s+name=["\']twitter:title["\']\s+content="([^"]+)"')
     add(r'<meta\s+name=["\']twitter:description["\']\s+content="([^"]+)"')
 
-    # Headings
+    # Headings (anywhere on page)
     add(r'<h1[^>]*>([^<]+)</h1>')
-    for tag in ['h2', 'h3']:
+    for tag in ['h2', 'h3', 'h4']:
         add(rf'<{tag}[^>]*>([^<]+)</{tag}>')
 
-    # Paragraphs (only inside main/article, skip nav/footer)
-    main_m = re.search(r'<main[^>]*>(.*?)</main>', html, re.DOTALL | re.IGNORECASE)
+    # Paragraphs and list items inside main/article
+    main_m = re.search(r'<(?:main|article)[^>]*>(.*?)</(?:main|article)>', html, re.DOTALL | re.IGNORECASE)
     if main_m:
         main_html = main_m.group(1)
         for m in re.finditer(r'<p[^>]*>([^<]{20,})</p>', main_html, re.IGNORECASE):
@@ -144,6 +144,30 @@ def extract_translatable(html):
             text = m.group(1).strip()
             if text and not text.startswith('http'):
                 segments.append(text)
+
+    # Navigation, header, footer — short UI strings
+    for section_tag in ('nav', 'header', 'footer'):
+        section_m = re.search(rf'<{section_tag}[^>]*>(.*?)</{section_tag}>', html, re.DOTALL | re.IGNORECASE)
+        if not section_m:
+            continue
+        section_html = section_m.group(1)
+        # <a> link text
+        for m in re.finditer(r'<a[^>]*>([^<]{2,60})</a>', section_html, re.IGNORECASE):
+            text = m.group(1).strip()
+            if text and not text.startswith('http') and not re.match(r'^[\d\s.,:;!?]+$', text):
+                segments.append(text)
+        # <button> and <span> text
+        for tag in ('button', 'span'):
+            for m in re.finditer(rf'<{tag}[^>]*>([^<]{{2,80}})</{tag}>', section_html, re.IGNORECASE):
+                text = m.group(1).strip()
+                if text and not text.startswith('http') and not re.match(r'^[\d\s.,:;!?]+$', text):
+                    segments.append(text)
+
+    # "Continue reading", "Read more" style links anywhere
+    for m in re.finditer(r'<a[^>]*class="[^"]*(?:more|read-more|continue)[^"]*"[^>]*>([^<]+)</a>', html, re.IGNORECASE):
+        text = m.group(1).strip()
+        if text:
+            segments.append(text)
 
     # Deduplicate while preserving order
     seen = set()
