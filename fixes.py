@@ -13,25 +13,26 @@ import json
 LANG_DIRS = ['ru', 'de', 'fr', 'es', 'it', 'pt']
 
 
-def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str) -> dict:
+def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
+                  site_domain: str = None) -> dict:
     """Dispatcher — runs a specific fix step."""
     try:
         if step_key == 'fix_descriptions':
             fix_descriptions(site_dir, groq_api_key)
         elif step_key == 'fix_schema':
-            fix_schema(site_dir)
+            fix_schema(site_dir, site_domain)
         elif step_key == 'fix_canonical':
-            fix_canonical(site_dir)
+            fix_canonical(site_dir, site_domain)
         elif step_key == 'fix_og_image':
-            fix_og_image(site_dir)
+            fix_og_image(site_dir, site_domain)
         elif step_key == 'fix_nofollow':
             fix_nofollow(site_dir)
         elif step_key == 'fix_robots_txt':
-            fix_robots_txt(site_dir)
+            fix_robots_txt(site_dir, site_domain)
         elif step_key == 'fix_hreflang_translated':
-            fix_hreflang_translated(site_dir, langs)
+            fix_hreflang_translated(site_dir, langs, site_domain)
         elif step_key == 'fix_translations':
-            fix_translations(site_dir, langs, groq_api_key)
+            fix_translations(site_dir, langs, groq_api_key, site_domain)
         elif step_key == 'fix_lang_switcher':
             fix_lang_switcher(site_dir)
         return {'ok': True}
@@ -169,9 +170,9 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
     return result[:155]
 
 
-def fix_schema(site_dir: str):
+def fix_schema(site_dir: str, site_domain: str = None):
     """Add BreadcrumbList schema to pages that don't have it."""
-    BASE_URL = _detect_base_url(site_dir)
+    BASE_URL = _detect_base_url(site_dir, site_domain)
 
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs
@@ -234,9 +235,9 @@ def fix_schema(site_dir: str):
                 f.write(html)
 
 
-def fix_canonical(site_dir: str):
+def fix_canonical(site_dir: str, site_domain: str = None):
     """Add <link rel="canonical"> to every HTML page that's missing it."""
-    BASE_URL = _detect_base_url(site_dir)
+    BASE_URL = _detect_base_url(site_dir, site_domain)
 
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
@@ -267,9 +268,9 @@ def fix_canonical(site_dir: str):
                 f.write(html)
 
 
-def fix_og_image(site_dir: str):
+def fix_og_image(site_dir: str, site_domain: str = None):
     """Add og:image to pages missing it, using first <img> found on the page."""
-    BASE_URL = _detect_base_url(site_dir)
+    BASE_URL = _detect_base_url(site_dir, site_domain)
 
     # Find a fallback image from the whole site
     fallback_img = _find_fallback_og_image(site_dir, BASE_URL)
@@ -373,13 +374,17 @@ def fix_nofollow(site_dir: str):
                     f.write(html)
 
 
-def fix_robots_txt(site_dir: str):
-    """Generate robots.txt if missing."""
+def fix_robots_txt(site_dir: str, site_domain: str = None):
+    """Generate robots.txt if missing. Overwrites if domain was example.com."""
     robots_path = os.path.join(site_dir, 'robots.txt')
     if os.path.exists(robots_path):
-        return
+        with open(robots_path, encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        # Regenerate if it has wrong domain placeholder
+        if 'example.com' not in content and site_domain is None:
+            return
 
-    BASE_URL = _detect_base_url(site_dir)
+    BASE_URL = _detect_base_url(site_dir, site_domain)
     sitemap_url = BASE_URL.rstrip('/') + '/sitemap.xml'
 
     content = (
@@ -393,7 +398,7 @@ def fix_robots_txt(site_dir: str):
         f.write(content)
 
 
-def fix_hreflang_translated(site_dir: str, langs: list):
+def fix_hreflang_translated(site_dir: str, langs: list, site_domain: str = None):
     """
     Add hreflang tags to translated pages that are missing them.
     Mirrors the hreflang block from the corresponding English source page.
@@ -401,7 +406,7 @@ def fix_hreflang_translated(site_dir: str, langs: list):
     if not langs:
         return
 
-    BASE_URL = _detect_base_url(site_dir)
+    BASE_URL = _detect_base_url(site_dir, site_domain)
 
     for lang in langs:
         lang_dir = os.path.join(site_dir, lang)
@@ -452,7 +457,7 @@ def fix_hreflang_translated(site_dir: str, langs: list):
                     f.write(html)
 
 
-def fix_translations(site_dir: str, langs: list, groq_api_key: str):
+def fix_translations(site_dir: str, langs: list, groq_api_key: str, site_domain: str = None):
     """Run translation script on the site directory."""
     translate_script = os.path.join(site_dir, 'scripts', 'translate.py')
     our_script = os.path.join(os.path.dirname(__file__), 'translate.py')
@@ -462,11 +467,17 @@ def fix_translations(site_dir: str, langs: list, groq_api_key: str):
     os.makedirs(os.path.join(site_dir, 'scripts'), exist_ok=True)
     shutil.copy(our_script, translate_script)
 
+    cmd = [
+        sys.executable, translate_script,
+        '--key', groq_api_key,
+        '--langs', ','.join(langs),
+        '--skip-existing',
+    ]
+    if site_domain:
+        cmd += ['--base-url', site_domain.rstrip('/')]
+
     result = subprocess.run(
-        [sys.executable, translate_script,
-         '--key', groq_api_key,
-         '--langs', ','.join(langs),
-         '--skip-existing'],
+        cmd,
         cwd=site_dir,
         capture_output=True,
         text=True,
@@ -602,20 +613,18 @@ def fix_lang_switcher(site_dir: str):
                 f.write(html)
 
 
-def _detect_base_url(site_dir: str) -> str:
-    """Try to find the site's base URL from canonical tags or sitemap."""
-    # Try sitemap.xml first
-    sitemap = os.path.join(site_dir, 'sitemap.xml')
-    if os.path.exists(sitemap):
-        with open(sitemap, encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-        m = re.search(r'<loc>(https?://[^/]+)', content)
-        if m:
-            return m.group(1)
+def _detect_base_url(site_dir: str, site_domain: str = None) -> str:
+    """
+    Return the site's base URL.
+    Priority: user-provided domain > canonical tags in HTML > sitemap.xml > fallback.
+    Sitemap is checked last because it may contain a wrong domain from a previous run.
+    """
+    if site_domain:
+        return site_domain.rstrip('/')
 
-    # Try canonical tags
+    # Try absolute canonical tags in HTML (more reliable than sitemap)
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules', 'scripts']]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -626,7 +635,7 @@ def _detect_base_url(site_dir: str) -> str:
             if m:
                 url = m.group(1)
                 base = re.match(r'(https?://[^/]+)', url)
-                if base:
+                if base and 'example.com' not in base.group(1):
                     return base.group(1)
 
     return 'https://example.com'

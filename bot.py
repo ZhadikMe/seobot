@@ -38,6 +38,7 @@ dp  = Dispatcher(storage=MemoryStorage())
 class SEOFlow(StatesGroup):
     waiting_repo         = State()
     waiting_mode         = State()
+    waiting_domain       = State()
     waiting_github_token = State()
     waiting_langs        = State()
     waiting_confirm      = State()
@@ -142,6 +143,12 @@ def token_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
+def domain_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text='⏭️ Пропустить', callback_data='domain:skip'),
+    ]])
+
+
 @dp.message(F.text.regexp(r'https?://github\.com/'))
 async def got_repo(message: Message, state: FSMContext):
     """Accept GitHub URL in any state — auto-reset if needed."""
@@ -177,18 +184,31 @@ async def chose_mode(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
     await state.update_data(mode=mode)
 
+    await callback.message.answer(
+        '🌐 *Укажи домен сайта* — он нужен для canonical, hreflang, sitemap и og:image.\n\n'
+        'Формат: `https://example.com` (без слеша в конце)\n\n'
+        '_Если домена ещё нет — нажми Пропустить, подставится заглушка._',
+        parse_mode='Markdown',
+        reply_markup=domain_keyboard()
+    )
+    await state.set_state(SEOFlow.waiting_domain)
+    await callback.answer()
+
+
+async def _after_domain(message_or_callback, state: FSMContext):
+    """Continue flow after domain step."""
+    data = await state.get_data()
+    mode = data.get('mode', 'audit')
+
     if mode == 'audit':
-        # Audit only — no token needed, go straight to language selection
-        data = await state.get_data()
-        await callback.message.answer(
+        await message_or_callback.answer(
             '🔍 Режим: только аудит.\n\n'
             '🌍 Выбери языки (для отчёта):',
             reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
         )
         await state.set_state(SEOFlow.waiting_langs)
     else:
-        # Full mode — need GitHub token
-        await callback.message.answer(
+        await message_or_callback.answer(
             '🔧 Режим: аудит + исправления + PR.\n\n'
             '🔑 *Нужен GitHub токен* — для скачивания репо и создания PR.\n\n'
             'Как получить:\n'
@@ -202,6 +222,21 @@ async def chose_mode(callback: CallbackQuery, state: FSMContext):
             reply_markup=token_keyboard()
         )
         await state.set_state(SEOFlow.waiting_github_token)
+
+
+@dp.message(SEOFlow.waiting_domain)
+async def got_domain(message: Message, state: FSMContext):
+    domain = message.text.strip().rstrip('/')
+    if not domain.startswith('http'):
+        domain = 'https://' + domain
+    await state.update_data(site_domain=domain)
+    await _after_domain(message, state)
+
+
+@dp.callback_query(SEOFlow.waiting_domain, F.data == 'domain:skip')
+async def skip_domain(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await _after_domain(callback.message, state)
     await callback.answer()
 
 
@@ -459,11 +494,12 @@ async def run_fixes(message: Message, state: FSMContext):
     ]
 
     from fixes import run_all_fixes
+    site_domain = data.get('site_domain')
     for step_text, step_key in steps:
         await bot.edit_message_text(text=step_text, chat_id=message.chat.id, message_id=status.message_id)
         try:
             result = await loop.run_in_executor(
-                None, run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY
+                None, run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY, site_domain
             )
             if not result['ok']:
                 await bot.edit_message_text(

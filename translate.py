@@ -26,7 +26,7 @@ from groq import Groq
 # ── Config ────────────────────────────────────────────────────────────────────
 
 SITE     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASE_URL = 'https://lifeandmusic.loricarson.com'
+BASE_URL = 'https://example.com'  # overridden by --base-url argument
 
 SUPPORTED_LANGS = {
     'ru': 'Russian',
@@ -461,7 +461,13 @@ def main():
                         help='Test without writing files')
     parser.add_argument('--skip-existing', action='store_true',
                         help='Skip languages where translated file already exists')
+    parser.add_argument('--base-url', default=None,
+                        help='Site base URL (e.g. https://example.com) for hreflang/canonical/sitemap')
     args = parser.parse_args()
+
+    if args.base_url:
+        global BASE_URL
+        BASE_URL = args.base_url.rstrip('/')
 
     target_langs = [l.strip() for l in args.langs.split(',') if l.strip() in SUPPORTED_LANGS]
     if not target_langs:
