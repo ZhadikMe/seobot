@@ -511,6 +511,14 @@ async def create_pull_request(
         base_branch = gh_repo.default_branch
         base_commit = gh_repo.get_branch(base_branch).commit
 
+        # Fetch current repo file tree to detect files new to GitHub
+        try:
+            full_tree = gh_repo.get_git_tree(base_commit.commit.tree.sha, recursive=True)
+            existing_paths = {item.path for item in full_tree.tree if item.type == 'blob'}
+        except Exception as e:
+            log.warning(f'Could not fetch repo tree: {e}')
+            existing_paths = set()
+
         # Find changed/new files by comparing with pre-fix snapshot
         tree_elements = []
         for root, dirs, files in os.walk(site_dir):
@@ -523,8 +531,10 @@ async def create_pull_request(
                 rel_in_repo = os.path.relpath(fpath, tmp_dir).replace(os.sep, '/')
                 try:
                     new_content = Path(fpath).read_bytes()
-                    if files_before.get(rel_in_site) == new_content:
-                        continue  # unchanged
+                    is_new_to_repo = rel_in_repo not in existing_paths
+                    is_changed_by_fixes = files_before.get(rel_in_site) != new_content
+                    if not is_new_to_repo and not is_changed_by_fixes:
+                        continue  # file exists in repo and wasn't modified by fixes
                     blob = gh_repo.create_git_blob(
                         base64.b64encode(new_content).decode(), 'base64'
                     )
