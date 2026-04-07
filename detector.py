@@ -74,6 +74,7 @@ def restore_from_archive(archive_dir: str, output_dir: str) -> str:
     html_count = 0
     css_count = 0
     img_count = 0
+    js_count = 0
 
     for root, dirs, files in os.walk(site_root):
         # Skip archive resource dirs
@@ -92,6 +93,9 @@ def restore_from_archive(archive_dir: str, output_dir: str) -> str:
             elif fname.endswith('.css'):
                 _copy_and_fix_css(src_path, dest_path, timestamp)
                 css_count += 1
+            elif fname.endswith('.js'):
+                shutil.copy2(src_path, dest_path)
+                js_count += 1
             elif _is_image(fname):
                 shutil.copy2(src_path, dest_path)
                 img_count += 1
@@ -119,8 +123,9 @@ def restore_from_archive(archive_dir: str, output_dir: str) -> str:
                         shutil.copy2(src, dest)
                     resource_counts[suffix] += 1
 
-    css_count = resource_counts['cs_']
-    img_count = resource_counts['im_']
+    # Add counts from separate resource dirs (cs_/im_/js_)
+    css_count += resource_counts['cs_']
+    img_count += resource_counts['im_']
     js_count = resource_counts['js_']
 
     return (
@@ -185,7 +190,20 @@ def _copy_and_fix_html(src: str, dest: str, timestamp: str, site_domain: str | N
     html = re.sub(r'<script[^>]*src="[^"]*web\.archive\.org[^"]*"[^>]*>.*?</script>', '', html, flags=re.DOTALL)
     html = re.sub(r'<script[^>]*>\s*window\.RufflePlayer.*?</script>', '', html, flags=re.DOTALL)
 
-    # Fix archive URLs: /web/TIMESTAMP[modifier]/https://domain/path
+    # Fix archive URLs in all forms:
+    # - https://web.archive.org/web/TIMESTAMP.../https://domain/path
+    # - /web/TIMESTAMP.../https://domain/path
+    # - ../../../TIMESTAMP.../http:/domain/path  (relative archive paths)
+    html = re.sub(
+        r'(?:\.\.\/)+\d{14}[a-z_]*/https?:/+([^\s"\'<>]+)',
+        lambda m: 'https://' + m.group(1),
+        html
+    )
+    html = re.sub(
+        r'(?:\.\.\/)+\d{14}[a-z_]*/http:/+([^\s"\'<>]+)',
+        lambda m: 'http://' + m.group(1),
+        html
+    )
     ARCHIVE_RE = r'(?:https?://web\.archive\.org)?/web/\d{14}(?:im_|cs_|js_)?/(https?://[^\s"\'<>]+)'
 
     def fix_archive_url(m):
