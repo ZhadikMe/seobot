@@ -37,9 +37,10 @@ dp  = Dispatcher(storage=MemoryStorage())
 
 class SEOFlow(StatesGroup):
     waiting_repo         = State()
+    waiting_mode         = State()
+    waiting_github_token = State()
     waiting_langs        = State()
     waiting_confirm      = State()
-    waiting_github_token = State()
     processing           = State()
 
 
@@ -59,6 +60,13 @@ def langs_keyboard(selected: set) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def mode_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text='🔍 Только аудит', callback_data='mode:audit'),
+        InlineKeyboardButton(text='🔧 Аудит + исправления + PR', callback_data='mode:full'),
+    ]])
+
+
 def confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text='✅ Да, исправить и создать PR', callback_data='confirm:yes'),
@@ -68,18 +76,47 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
+INFO_TEXT = (
+    '*SEO-бот — что умеет и как работает*\n\n'
+    '*Что делает бот:*\n'
+    '1\\. Скачивает сайт с GitHub\n'
+    '2\\. Анализирует SEO: title, description, H1, canonical, og:image, schema\n'
+    '3\\. В режиме «полный»: исправляет мета\\-теги, добавляет Schema\\.org, '
+    'переводит на выбранные языки, создаёт Pull Request\n\n'
+    '*Режимы:*\n'
+    '🔍 *Только аудит* — смотришь список проблем, ничего не меняется\n'
+    '🔧 *Аудит \\+ PR* — бот исправляет и создаёт PR в твой репо\n\n'
+    '*Поддерживаемые структуры репо:*\n'
+    '• `web\\.archive\\.org/` дамп — бот сам распакует\n'
+    '• Папка `site/` с HTML файлами\n'
+    '• HTML файлы в корне репо\n\n'
+    '*Для PR нужен GitHub токен:*\n'
+    'github\\.com/settings/tokens → Classic → scope `repo`\n\n'
+    '*Команды:*\n'
+    '/start — начать\n'
+    '/cancel — отменить текущую операцию\n'
+    '/info — эта справка'
+)
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         '👋 Привет! Я SEO-бот.\n\n'
-        'Я анализирую статические сайты, исправляю SEO-проблемы '
-        'и создаю Pull Request с готовыми изменениями.\n\n'
+        'Анализирую сайты на GitHub, нахожу SEO-проблемы '
+        'и создаю Pull Request с исправлениями.\n\n'
         '📎 Отправь ссылку на GitHub репозиторий:\n'
-        '`https://github.com/user/repo`',
+        '`https://github.com/user/repo`\n\n'
+        '_/info — подробнее о боте_',
         parse_mode='Markdown'
     )
     await state.set_state(SEOFlow.waiting_repo)
+
+
+@dp.message(Command('info'))
+async def cmd_info(message: Message):
+    await message.answer(INFO_TEXT, parse_mode='MarkdownV2')
 
 
 @dp.message(Command('cancel'))
@@ -114,13 +151,40 @@ async def got_repo(message: Message, state: FSMContext):
                             user_github_token=GITHUB_TOKEN)
     await message.answer(
         f'✅ Репозиторий: `{repo_slug}`\n\n'
-        '🔑 Отправь GitHub токен (`ghp_...`) — нужен для скачивания и создания PR.\n'
-        'Создать: [github.com/settings/tokens](https://github.com/settings/tokens) → Classic → scope `repo`\n\n'
-        '_Сообщение с токеном будет удалено сразу._',
+        'Что хочешь сделать?',
         parse_mode='Markdown',
-        reply_markup=token_keyboard()
+        reply_markup=mode_keyboard()
     )
-    await state.set_state(SEOFlow.waiting_github_token)
+    await state.set_state(SEOFlow.waiting_mode)
+
+
+@dp.callback_query(SEOFlow.waiting_mode, F.data.startswith('mode:'))
+async def chose_mode(callback: CallbackQuery, state: FSMContext):
+    mode = callback.data.split(':')[1]  # 'audit' or 'full'
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.update_data(mode=mode)
+
+    if mode == 'audit':
+        # Audit only — no token needed, go straight to language selection
+        data = await state.get_data()
+        await callback.message.answer(
+            '🔍 Режим: только аудит.\n\n'
+            '🌍 Выбери языки (для отчёта):',
+            reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
+        )
+        await state.set_state(SEOFlow.waiting_langs)
+    else:
+        # Full mode — need GitHub token
+        await callback.message.answer(
+            '🔧 Режим: аудит + исправления + PR.\n\n'
+            '🔑 Отправь GitHub токен (`ghp_...`) — нужен для скачивания и создания PR.\n'
+            'Создать: [github.com/settings/tokens](https://github.com/settings/tokens) → Classic → scope `repo`\n\n'
+            '_Сообщение с токеном будет удалено сразу._',
+            parse_mode='Markdown',
+            reply_markup=token_keyboard()
+        )
+        await state.set_state(SEOFlow.waiting_github_token)
+    await callback.answer()
 
 
 @dp.message(SEOFlow.waiting_github_token)
@@ -136,7 +200,6 @@ async def got_github_token(message: Message, state: FSMContext):
         )
         return
 
-    # Try to delete message with token for security
     try:
         await message.delete()
     except Exception:
@@ -156,8 +219,8 @@ async def skip_github_token(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
     data = await state.get_data()
     await callback.message.answer(
-        '⏭️ Токен пропущен — PR создать не получится, только аудит.\n\n'
-        '🌍 Выбери языки для перевода:',
+        '⏭️ Без токена — только аудит, PR не создастся.\n\n'
+        '🌍 Выбери языки:',
         reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
     )
     await state.set_state(SEOFlow.waiting_langs)
@@ -188,24 +251,51 @@ async def toggle_lang(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+async def _fetch_zip(session, repo_slug: str, headers: dict) -> bytes:
+    """
+    Try multiple download strategies:
+    1. Direct archive URL (no API quota, works for public repos without token)
+    2. GitHub API zipball (requires token on shared IPs due to rate limits)
+    """
+    import aiohttp
+
+    # Strategy 1: direct archive download — no rate limit, no auth needed for public repos
+    for branch in ('main', 'master'):
+        url = f'https://github.com/{repo_slug}/archive/refs/heads/{branch}.zip'
+        log.info(f'Trying direct download: {url}')
+        async with session.get(url, headers=headers) as resp:
+            if resp.status == 200:
+                return await resp.read()
+            log.info(f'Direct {branch}: HTTP {resp.status}')
+
+    # Strategy 2: API endpoint (needs token on Railway due to shared IP rate limits)
+    api_url = f'https://api.github.com/repos/{repo_slug}/zipball'
+    log.info(f'Trying API download: {api_url}')
+    api_headers = {**headers, 'Accept': 'application/vnd.github+json'}
+    async with session.get(api_url, headers=api_headers) as resp:
+        if resp.status == 200:
+            return await resp.read()
+        if resp.status == 403:
+            raise RuntimeError(
+                'GitHub вернул 403 — превышен rate limit для публичных запросов.\n'
+                'Отправь GitHub токен (ghp_...) для авторизации.'
+            )
+        raise RuntimeError(f'GitHub вернул {resp.status}')
+
+
 async def download_repo_zip(repo_slug: str, dest_dir: str, token: str | None = None):
     """Download repo as ZIP from GitHub (async, long timeout) and extract."""
     import zipfile, io, aiohttp
 
     timeout = aiohttp.ClientTimeout(total=300, connect=30)
-
-    zip_url = f'https://api.github.com/repos/{repo_slug}/zipball'
-    log.info(f'Downloading ZIP via API: {zip_url}')
-    headers = {'Accept': 'application/vnd.github+json'}
+    headers = {}
     if token:
         headers['Authorization'] = f'Bearer {token}'
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(zip_url, headers=headers) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f'GitHub API returned {resp.status}')
-            data = await resp.read()
-            log.info(f'Downloaded {len(data)//1024} KB')
+        data = await _fetch_zip(session, repo_slug, headers)
+
+    log.info(f'Downloaded {len(data)//1024} KB')
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         members = zf.namelist()
@@ -274,17 +364,23 @@ async def run_audit(message: Message, state: FSMContext):
 
     await state.update_data(audit_results=results, tmp_dir=tmp_dir)
 
-    # Format report
+    mode = data.get('mode', 'full')
     report = format_audit_report(results, repo_slug, langs)
     await bot.edit_message_text(
         text=report, chat_id=message.chat.id, message_id=status_msg.message_id,
         parse_mode='Markdown')
 
-    await message.answer(
-        '🔧 Запустить автоисправление и создать Pull Request?',
-        reply_markup=confirm_keyboard()
-    )
-    await state.set_state(SEOFlow.waiting_confirm)
+    if mode == 'audit':
+        # Audit-only mode — clean up and finish
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        await state.clear()
+        await message.answer('✅ Аудит завершён. Отправь новую ссылку для следующего сайта.')
+    else:
+        await message.answer(
+            '🔧 Запустить автоисправление и создать Pull Request?',
+            reply_markup=confirm_keyboard()
+        )
+        await state.set_state(SEOFlow.waiting_confirm)
 
 
 @dp.callback_query(SEOFlow.waiting_confirm, F.data.startswith('confirm:'))

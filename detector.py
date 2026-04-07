@@ -93,16 +93,36 @@ def restore_from_archive(archive_dir: str, output_dir: str) -> str:
                 shutil.copy2(src_path, dest_path)
                 img_count += 1
 
-    # Also copy CSS from timestamp_cs_ dirs
-    for entry in os.listdir(os.path.dirname(snapshot_dir)):
-        if entry.startswith(timestamp) and entry.endswith('cs_'):
-            css_dir = os.path.join(os.path.dirname(snapshot_dir), entry)
-            _copy_css_resources(css_dir, output_dir, timestamp)
-            css_count += 1
+    # Copy CSS, images, JS from timestampXX_ resource dirs
+    web_dir = os.path.dirname(snapshot_dir)
+    resource_counts = {'cs_': 0, 'im_': 0, 'js_': 0}
+    for suffix, is_css in (('cs_', True), ('im_', False), ('js_', False)):
+        res_dir = os.path.join(web_dir, timestamp + suffix)
+        if not os.path.isdir(res_dir):
+            continue
+        for root, dirs, files in os.walk(res_dir):
+            for fname in files:
+                src = os.path.join(root, fname)
+                rel = os.path.relpath(src, res_dir)
+                local = _archive_rel_to_local_path(rel)
+                if not local:
+                    continue
+                dest = os.path.join(output_dir, local)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if not os.path.exists(dest):
+                    if is_css and local.endswith('.css'):
+                        _copy_and_fix_css(src, dest, timestamp)
+                    else:
+                        shutil.copy2(src, dest)
+                    resource_counts[suffix] += 1
+
+    css_count = resource_counts['cs_']
+    img_count = resource_counts['im_']
+    js_count = resource_counts['js_']
 
     return (
         f'web.archive.org снапшот от {_format_timestamp(timestamp)}\n'
-        f'Извлечено: {html_count} HTML, {css_count} CSS, {img_count} изображений'
+        f'Извлечено: {html_count} HTML, {css_count} CSS, {img_count} изображений, {js_count} JS'
     )
 
 
@@ -197,19 +217,22 @@ def _copy_and_fix_css(src: str, dest: str, timestamp: str):
         f.write(css)
 
 
-def _copy_css_resources(css_archive_dir: str, output_dir: str, timestamp: str):
-    """Copy CSS resources from timestampcs_ directory."""
-    for root, dirs, files in os.walk(css_archive_dir):
-        for fname in files:
-            if fname.endswith('.css'):
-                src = os.path.join(root, fname)
-                # Try to preserve relative path
-                rel = os.path.relpath(root, css_archive_dir)
-                dest_dir = os.path.join(output_dir, 'css')
-                os.makedirs(dest_dir, exist_ok=True)
-                dest = os.path.join(dest_dir, fname)
-                if not os.path.exists(dest):
-                    _copy_and_fix_css(src, dest, timestamp)
+def _archive_rel_to_local_path(rel: str) -> str | None:
+    """
+    Convert web.archive resource relative path to local site path.
+    On Windows, ':' is stored as U+F03A and '?' as U+F03F.
+    e.g. 'http\uf03a\\kitcarsoncolorado.com\\wp-content\\themes\\style.css\uf03fver=1.4'
+    → 'wp-content/themes/style.css'
+    """
+    # Decode private-use chars back to ASCII
+    normalized = rel.replace('\uf03a', ':').replace('\uf03f', '?').replace('\\', '/')
+    # Drop query string
+    normalized = normalized.split('?')[0]
+    # Extract path after domain: http(s)://domain/path or http:/domain/path
+    m = re.match(r'https?:/?/?[^/]+(/.*)', normalized)
+    if not m:
+        return None
+    return m.group(1).lstrip('/')
 
 
 def _is_image(fname: str) -> bool:
