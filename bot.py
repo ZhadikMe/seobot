@@ -79,22 +79,25 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
 INFO_TEXT = (
     '*SEO-бот — что умеет и как работает*\n\n'
     '*Что делает бот:*\n'
-    '1\\. Скачивает сайт с GitHub\n'
-    '2\\. Анализирует SEO: title, description, H1, canonical, og:image, schema\n'
-    '3\\. В режиме «полный»: исправляет мета\\-теги, добавляет Schema\\.org, '
+    '1. Скачивает сайт с GitHub\n'
+    '2. Анализирует SEO: title, description, H1, canonical, og:image, schema\n'
+    '3. В режиме «полный»: исправляет мета-теги, добавляет Schema.org, '
     'переводит на выбранные языки, создаёт Pull Request\n\n'
     '*Режимы:*\n'
     '🔍 *Только аудит* — смотришь список проблем, ничего не меняется\n'
-    '🔧 *Аудит \\+ PR* — бот исправляет и создаёт PR в твой репо\n\n'
+    '🔧 *Аудит + PR* — бот исправляет и создаёт PR в твой репо\n\n'
     '*Поддерживаемые структуры репо:*\n'
-    '• `web\\.archive\\.org/` дамп — бот сам распакует\n'
+    '• `web.archive.org/` дамп — бот сам распакует CSS, картинки, JS\n'
     '• Папка `site/` с HTML файлами\n'
     '• HTML файлы в корне репо\n\n'
+    '*Переводы:*\n'
+    'Каждый язык добавляется инкрементально — повторный запуск с другим языком '
+    'не удалит предыдущие переводы.\n\n'
     '*Для PR нужен GitHub токен:*\n'
-    'github\\.com/settings/tokens → Classic → scope `repo`\n\n'
+    'github.com/settings/tokens → Classic → scope `repo`\n\n'
     '*Команды:*\n'
     '/start — начать\n'
-    '/cancel — отменить текущую операцию\n'
+    '/cancel — отменить\n'
     '/info — эта справка'
 )
 
@@ -116,7 +119,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @dp.message(Command('info'))
 async def cmd_info(message: Message):
-    await message.answer(INFO_TEXT, parse_mode='MarkdownV2')
+    await message.answer(INFO_TEXT, parse_mode='Markdown')
 
 
 @dp.message(Command('cancel'))
