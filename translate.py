@@ -415,13 +415,25 @@ def translate_page(client, src_path, rel_path, target_langs, dry_run=False, skip
 # ── Sitemap update ────────────────────────────────────────────────────────────
 
 def update_sitemap(translated_pages):
-    """Add translated URLs to sitemap.xml. Creates it if missing."""
+    """
+    Rebuild sitemap.xml with correct BASE_URL.
+    If sitemap already exists with a wrong domain, replaces all its <loc> URLs.
+    """
     sitemap_path = os.path.join(SITE, 'sitemap.xml')
+
     if not os.path.exists(sitemap_path):
-        with open(sitemap_path, 'w', encoding='utf-8') as f:
-            f.write('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n</urlset>')
-    with open(sitemap_path, encoding='utf-8') as f:
-        sitemap = f.read()
+        sitemap = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n</urlset>'
+    else:
+        with open(sitemap_path, encoding='utf-8') as f:
+            sitemap = f.read()
+
+    # Fix any wrong domain already in sitemap <loc> tags
+    if BASE_URL != 'https://example.com':
+        def fix_loc(m):
+            url = m.group(1)
+            fixed = re.sub(r'^https?://[^/]+', BASE_URL, url)
+            return f'<loc>{fixed}</loc>'
+        sitemap = re.sub(r'<loc>(https?://[^<]+)</loc>', fix_loc, sitemap)
 
     new_entries = []
     for rel_path, langs in translated_pages.items():
@@ -442,9 +454,10 @@ def update_sitemap(translated_pages):
     if new_entries:
         block = '\n\n  <!-- Translated pages -->\n' + '\n'.join(new_entries)
         sitemap = sitemap.replace('</urlset>', block + '\n\n</urlset>')
-        with open(sitemap_path, 'w', encoding='utf-8') as f:
-            f.write(sitemap)
-        print(f'\nSitemap: added {len(new_entries)} translated URLs')
+
+    with open(sitemap_path, 'w', encoding='utf-8') as f:
+        f.write(sitemap)
+    print(f'\nSitemap: {len(new_entries)} new translated URLs added')
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

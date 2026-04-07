@@ -173,6 +173,7 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
 def fix_schema(site_dir: str, site_domain: str = None):
     """Add BreadcrumbList schema to pages that don't have it."""
     BASE_URL = _detect_base_url(site_dir, site_domain)
+    is_placeholder = (BASE_URL == 'https://example.com')
 
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs
@@ -185,9 +186,27 @@ def fix_schema(site_dir: str, site_domain: str = None):
                 html = f.read()
 
             if 'BreadcrumbList' in html:
-                # Fix wrong domain (example.com) in existing breadcrumbs
-                if 'example.com' in html:
-                    html = html.replace('https://example.com', BASE_URL)
+                if is_placeholder:
+                    continue
+                # Replace any wrong domain in existing BreadcrumbList JSON-LD
+                changed = False
+                def _fix_schema_domain(m):
+                    nonlocal changed
+                    block = m.group(0)
+                    # Replace any https://... domain that isn't the correct one
+                    fixed = re.sub(
+                        r'https://(?!schema\.org)[^/\\"]+',
+                        lambda dm: BASE_URL if dm.group(0) != BASE_URL else dm.group(0),
+                        block
+                    )
+                    if fixed != block:
+                        changed = True
+                    return fixed
+                html = re.sub(
+                    r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>.*?</script>',
+                    _fix_schema_domain, html, flags=re.DOTALL
+                )
+                if changed:
                     with open(fpath, 'w', encoding='utf-8') as f:
                         f.write(html)
                 continue
@@ -236,8 +255,14 @@ def fix_schema(site_dir: str, site_domain: str = None):
 
 
 def fix_canonical(site_dir: str, site_domain: str = None):
-    """Add <link rel="canonical"> to every HTML page that's missing it."""
+    """
+    Add or upgrade <link rel="canonical"> on every HTML page.
+    - If missing: adds absolute canonical.
+    - If relative (e.g. href="/about/"): upgrades to absolute when domain is known.
+    - If already absolute with correct domain: skips.
+    """
     BASE_URL = _detect_base_url(site_dir, site_domain)
+    is_placeholder = (BASE_URL == 'https://example.com')
 
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
@@ -248,11 +273,7 @@ def fix_canonical(site_dir: str, site_domain: str = None):
             with open(fpath, encoding='utf-8', errors='ignore') as f:
                 html = f.read()
 
-            if re.search(r'rel=["\']canonical["\']', html, re.IGNORECASE):
-                continue
-
             rel = fpath.replace(site_dir, '').replace(os.sep, '/').lstrip('/')
-            # Build canonical URL: strip index.html, add trailing slash
             url_path = '/' + rel
             if url_path.endswith('/index.html'):
                 url_path = url_path[:-len('index.html')]
@@ -261,8 +282,31 @@ def fix_canonical(site_dir: str, site_domain: str = None):
 
             canonical_url = BASE_URL.rstrip('/') + url_path
 
-            tag = f'<link rel="canonical" href="{canonical_url}">\n'
-            html = html.replace('</head>', tag + '</head>', 1)
+            existing = re.search(
+                r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\']([^"\']*)["\']',
+                html, re.IGNORECASE
+            )
+
+            if existing:
+                current_href = existing.group(1)
+                # Already absolute with non-placeholder domain — leave it
+                if current_href.startswith('http') and 'example.com' not in current_href:
+                    continue
+                # Relative or placeholder — upgrade if we have a real domain
+                if is_placeholder:
+                    continue
+                html = re.sub(
+                    r'<link([^>]*)rel=["\']canonical["\']([^>]*)href=["\'][^"\']*["\']',
+                    f'<link\\1rel="canonical"\\2href="{canonical_url}"',
+                    html, flags=re.IGNORECASE
+                )
+            else:
+                if is_placeholder:
+                    # Add relative canonical as fallback
+                    tag = f'<link rel="canonical" href="{url_path}">\n'
+                else:
+                    tag = f'<link rel="canonical" href="{canonical_url}">\n'
+                html = html.replace('</head>', tag + '</head>', 1)
 
             with open(fpath, 'w', encoding='utf-8') as f:
                 f.write(html)
