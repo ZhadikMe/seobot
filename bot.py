@@ -452,20 +452,6 @@ async def handle_confirm(callback: CallbackQuery, state: FSMContext):
     await run_fixes(callback.message, state)
 
 
-def _snapshot_files(site_dir: str) -> dict:
-    """Return {rel_path: bytes} for all files in site_dir."""
-    snap = {}
-    for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules')]
-        for fname in files:
-            fpath = os.path.join(root, fname)
-            rel = os.path.relpath(fpath, site_dir).replace(os.sep, '/')
-            try:
-                snap[rel] = Path(fpath).read_bytes()
-            except Exception:
-                pass
-    return snap
-
 
 async def run_fixes(message: Message, state: FSMContext):
     """Run all SEO fixes and create PR."""
@@ -477,9 +463,7 @@ async def run_fixes(message: Message, state: FSMContext):
 
     status = await message.answer('⚙️ Начинаю исправления...')
 
-    # Snapshot files BEFORE fixes to detect changes later
     loop = asyncio.get_event_loop()
-    files_before = await loop.run_in_executor(None, _snapshot_files, site_dir)
 
     steps = [
         ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
@@ -513,7 +497,7 @@ async def run_fixes(message: Message, state: FSMContext):
     effective_token = GITHUB_TOKEN or data.get('user_github_token')
     await bot.edit_message_text(text='🚀 Создаю Pull Request...', chat_id=message.chat.id, message_id=status.message_id)
 
-    pr_url = await create_pull_request(tmp_dir, site_dir, repo_slug, langs, files_before, effective_token)
+    pr_url = await create_pull_request(tmp_dir, site_dir, repo_slug, langs, {}, effective_token)
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     await state.clear()
@@ -537,10 +521,13 @@ async def create_pull_request(
     tmp_dir: str, site_dir: str, repo_slug: str, langs: list, files_before: dict,
     token: str | None = None,
 ) -> str | None:
-    """Create PR using GitHub Git Data API (no local git required)."""
+    """Create PR using GitHub Git Data API — uploads all site files every time."""
     token = token or GITHUB_TOKEN
     if not token:
         return None
+
+    # Skip extensions that are too large or irrelevant for the site
+    SKIP_EXTENSIONS = {'.zip', '.tar', '.gz', '.rar', '.7z', '.mp4', '.mp3', '.mov', '.avi'}
 
     try:
         import base64
@@ -552,38 +539,37 @@ async def create_pull_request(
         base_branch = gh_repo.default_branch
         base_commit = gh_repo.get_branch(base_branch).commit
 
-        # Fetch current repo file tree to detect files new to GitHub
-        try:
-            full_tree = gh_repo.get_git_tree(base_commit.commit.tree.sha, recursive=True)
-            existing_paths = {item.path for item in full_tree.tree if item.type == 'blob'}
-        except Exception as e:
-            log.warning(f'Could not fetch repo tree: {e}')
-            existing_paths = set()
-
-        # Find changed/new files by comparing with pre-fix snapshot
+        # Upload every file from site_dir — no comparison, no skipping
         tree_elements = []
+        skipped = 0
         for root, dirs, files in os.walk(site_dir):
             dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules')]
             for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in SKIP_EXTENSIONS:
+                    skipped += 1
+                    continue
                 fpath = os.path.join(root, fname)
-                # Path relative to site_dir (used for snapshot comparison)
-                rel_in_site = os.path.relpath(fpath, site_dir).replace(os.sep, '/')
-                # Path relative to repo root (used in GitHub)
+                # Path relative to repo root (site/ prefix preserved)
                 rel_in_repo = os.path.relpath(fpath, tmp_dir).replace(os.sep, '/')
                 try:
-                    new_content = Path(fpath).read_bytes()
-                    is_new_to_repo = rel_in_repo not in existing_paths
-                    is_changed_by_fixes = files_before.get(rel_in_site) != new_content
-                    if not is_new_to_repo and not is_changed_by_fixes:
-                        continue  # file exists in repo and wasn't modified by fixes
+                    content = Path(fpath).read_bytes()
+                    # Skip files >5MB (GitHub API limit is 100MB but large files slow things down)
+                    if len(content) > 5 * 1024 * 1024:
+                        log.warning(f'Skipping large file: {rel_in_repo} ({len(content)//1024}KB)')
+                        skipped += 1
+                        continue
                     blob = gh_repo.create_git_blob(
-                        base64.b64encode(new_content).decode(), 'base64'
+                        base64.b64encode(content).decode(), 'base64'
                     )
                     tree_elements.append(InputGitTreeElement(
                         path=rel_in_repo, mode='100644', type='blob', sha=blob.sha
                     ))
                 except Exception as e:
                     log.warning(f'Skipping {rel_in_repo}: {e}')
+                    skipped += 1
+
+        log.info(f'PR: {len(tree_elements)} files to upload, {skipped} skipped')
 
         if not tree_elements:
             log.info('No changed files — skipping PR')
