@@ -189,16 +189,18 @@ async def run_audit(message: Message, state: FSMContext):
     try:
         await download_repo_zip(repo_slug, tmp_dir)
     except Exception as e:
-        await bot.edit_message_text(f'❌ Не удалось скачать репозиторий:\n`{e}`',
-                                    message.chat.id, status_msg.message_id,
-                                    parse_mode='Markdown')
+        await bot.edit_message_text(
+            text=f'❌ Не удалось скачать репозиторий:\n`{e}`',
+            chat_id=message.chat.id, message_id=status_msg.message_id,
+            parse_mode='Markdown')
         shutil.rmtree(tmp_dir, ignore_errors=True)
         await state.clear()
         return
 
     # Detect and normalize structure
-    await bot.edit_message_text('🔎 Определяю структуру репозитория...',
-                                message.chat.id, status_msg.message_id)
+    await bot.edit_message_text(
+        text='🔎 Определяю структуру репозитория...',
+        chat_id=message.chat.id, message_id=status_msg.message_id)
     try:
         from detector import detect_and_normalize
         site_dir, structure_desc = await asyncio.get_event_loop().run_in_executor(
@@ -206,14 +208,14 @@ async def run_audit(message: Message, state: FSMContext):
         )
         await state.update_data(site_dir=site_dir)
     except Exception as e:
-        await bot.edit_message_text(f'❌ {e}', message.chat.id, status_msg.message_id)
+        await bot.edit_message_text(text=f'❌ {e}', chat_id=message.chat.id, message_id=status_msg.message_id)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         await state.clear()
         return
 
     await bot.edit_message_text(
-        f'✅ Структура: {structure_desc}\n\n🔍 Запускаю SEO аудит...',
-        message.chat.id, status_msg.message_id
+        text=f'✅ Структура: {structure_desc}\n\n🔍 Запускаю SEO аудит...',
+        chat_id=message.chat.id, message_id=status_msg.message_id
     )
 
     # Run audit
@@ -224,8 +226,9 @@ async def run_audit(message: Message, state: FSMContext):
 
     # Format report
     report = format_audit_report(results, repo_slug, langs)
-    await bot.edit_message_text(report, message.chat.id, status_msg.message_id,
-                                parse_mode='Markdown')
+    await bot.edit_message_text(
+        text=report, chat_id=message.chat.id, message_id=status_msg.message_id,
+        parse_mode='Markdown')
 
     await message.answer(
         '🔧 Запустить автоисправление и создать Pull Request?',
@@ -288,21 +291,21 @@ async def run_fixes(message: Message, state: FSMContext):
 
     from fixes import run_all_fixes
     for step_text, step_key in steps:
-        await bot.edit_message_text(step_text, message.chat.id, status.message_id)
+        await bot.edit_message_text(text=step_text, chat_id=message.chat.id, message_id=status.message_id)
         try:
             result = await loop.run_in_executor(
                 None, run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY
             )
             if not result['ok']:
                 await bot.edit_message_text(
-                    f'⚠️ {step_text[2:]}\n`{result["error"]}`',
-                    message.chat.id, status.message_id, parse_mode='Markdown'
+                    text=f'⚠️ {step_text[2:]}\n`{result["error"]}`',
+                    chat_id=message.chat.id, message_id=status.message_id, parse_mode='Markdown'
                 )
         except Exception as e:
             log.error(f'Fix step {step_key} failed: {e}')
 
     # Create PR
-    await bot.edit_message_text('🚀 Создаю Pull Request...', message.chat.id, status.message_id)
+    await bot.edit_message_text(text='🚀 Создаю Pull Request...', chat_id=message.chat.id, message_id=status.message_id)
 
     pr_url = await create_pull_request(tmp_dir, site_dir, repo_slug, langs, files_before)
 
@@ -311,16 +314,16 @@ async def run_fixes(message: Message, state: FSMContext):
 
     if pr_url:
         await bot.edit_message_text(
-            f'✅ *Готово!*\n\n'
-            f'Pull Request создан:\n{pr_url}\n\n'
-            f'Проверь изменения и нажми Merge.',
-            message.chat.id, status.message_id, parse_mode='Markdown'
+            text=(f'✅ *Готово!*\n\n'
+                  f'Pull Request создан:\n{pr_url}\n\n'
+                  f'Проверь изменения и нажми Merge.'),
+            chat_id=message.chat.id, message_id=status.message_id, parse_mode='Markdown'
         )
     else:
         await bot.edit_message_text(
-            '✅ *Исправления применены локально.*\n\n'
-            '⚠️ PR не создан — нужен GITHUB\\_TOKEN в настройках бота.',
-            message.chat.id, status.message_id, parse_mode='Markdown'
+            text=('✅ *Исправления применены локально.*\n\n'
+                  '⚠️ PR не создан — нужен GITHUB\\_TOKEN в настройках бота.'),
+            chat_id=message.chat.id, message_id=status.message_id, parse_mode='Markdown'
         )
 
 
