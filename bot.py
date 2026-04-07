@@ -14,7 +14,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import (Message, InlineKeyboardMarkup, InlineKeyboardButton,
+                            CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove)
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -31,6 +32,9 @@ GITHUB_TOKEN   = os.getenv('GITHUB_TOKEN')
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
+
+# Global processing lock — only one site at a time
+_processing_user_id: int | None = None
 
 
 # ── FSM States ────────────────────────────────────────────────────────────────
@@ -115,32 +119,36 @@ async def cmd_start(message: Message, state: FSMContext):
         'Анализирую сайты на GitHub, нахожу SEO-проблемы '
         'и создаю Pull Request с исправлениями.\n\n'
         '📎 Отправь ссылку на GitHub репозиторий:\n'
-        '`https://github.com/user/repo`\n\n'
-        '_/info — подробнее о боте_',
-        parse_mode='Markdown'
+        '`https://github.com/user/repo`',
+        parse_mode='Markdown',
+        reply_markup=main_keyboard()
     )
     await state.set_state(SEOFlow.waiting_repo)
 
 
 @dp.message(Command('info'))
+@dp.message(F.text == 'ℹ️ Info')
 async def cmd_info(message: Message):
     await message.answer(INFO_TEXT, parse_mode='Markdown')
 
 
 @dp.message(Command('cancel'))
+@dp.message(F.text == '❌ Отменить')
 async def cmd_cancel(message: Message, state: FSMContext):
+    global _processing_user_id
     data = await state.get_data()
     tmp = data.get('tmp_dir')
     if tmp and os.path.exists(tmp):
         shutil.rmtree(tmp, ignore_errors=True)
+    if _processing_user_id == message.from_user.id:
+        _processing_user_id = None
     await state.clear()
-    await message.answer('❌ Отменено.')
+    await message.answer('❌ Отменено.', reply_markup=main_keyboard())
 
 
 def token_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text='⏭️ Пропустить (публичный репо)', callback_data='token:skip'),
-    ]])
+    # No skip button — token is required for full mode
+    return InlineKeyboardMarkup(inline_keyboard=[])
 
 
 def domain_keyboard() -> InlineKeyboardMarkup:
@@ -149,9 +157,31 @@ def domain_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
+def main_keyboard() -> ReplyKeyboardMarkup:
+    """Persistent bottom keyboard shown after /start."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text='ℹ️ Info'), KeyboardButton(text='❌ Отменить')],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
 @dp.message(F.text.regexp(r'https?://github\.com/'))
 async def got_repo(message: Message, state: FSMContext):
     """Accept GitHub URL in any state — auto-reset if needed."""
+    global _processing_user_id
+
+    # Check if another user is currently processing
+    if _processing_user_id is not None and _processing_user_id != message.from_user.id:
+        await message.answer(
+            '⏳ *Бот сейчас занят* — обрабатывается другой сайт.\n\n'
+            'Попробуй через несколько минут.',
+            parse_mode='Markdown'
+        )
+        return
+
     url = message.text.strip().rstrip('/')
     log.info(f'got_repo: url={url!r}')
     m = re.match(r'https?://github\.com/([^/]+/[^/]+?)(?:\.git)?$', url)
@@ -367,6 +397,9 @@ async def download_repo_zip(repo_slug: str, dest_dir: str, token: str | None = N
 
 async def run_audit(message: Message, state: FSMContext):
     """Clone repo, detect structure, normalize, run SEO audit."""
+    global _processing_user_id
+    _processing_user_id = message.from_user.id
+
     data = await state.get_data()
     repo_url   = data['repo_url']
     repo_slug  = data['repo_slug']
@@ -387,6 +420,7 @@ async def run_audit(message: Message, state: FSMContext):
             chat_id=message.chat.id, message_id=status_msg.message_id,
             parse_mode='Markdown')
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        _processing_user_id = None
         await state.clear()
         return
 
@@ -403,6 +437,7 @@ async def run_audit(message: Message, state: FSMContext):
     except Exception as e:
         await bot.edit_message_text(text=f'❌ {e}', chat_id=message.chat.id, message_id=status_msg.message_id)
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        _processing_user_id = None
         await state.clear()
         return
 
@@ -426,11 +461,14 @@ async def run_audit(message: Message, state: FSMContext):
     if mode == 'audit':
         # Audit-only mode — clean up and finish
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        _processing_user_id = None
         await state.clear()
         await message.answer('✅ Аудит завершён. Отправь новую ссылку для следующего сайта.')
     else:
         await message.answer(
+            '📋 _Аудит показывает состояние сайта ДО исправлений — это список задач для бота._\n\n'
             '🔧 Запустить автоисправление и создать Pull Request?',
+            parse_mode='Markdown',
             reply_markup=confirm_keyboard()
         )
         await state.set_state(SEOFlow.waiting_confirm)
@@ -500,6 +538,7 @@ async def run_fixes(message: Message, state: FSMContext):
     pr_url = await create_pull_request(tmp_dir, site_dir, repo_slug, langs, {}, effective_token)
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
+    _processing_user_id = None
     await state.clear()
 
     if pr_url:
