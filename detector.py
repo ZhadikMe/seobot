@@ -67,6 +67,9 @@ def restore_from_archive(archive_dir: str, output_dir: str) -> str:
     if not site_root:
         raise ValueError('Не удалось найти корневые HTML файлы в снапшоте')
 
+    # Extract site domain from site_root path (e.g. .../http\uf03a\kitcarsoncolorado.com\)
+    site_domain = _extract_domain_from_path(site_root)
+
     # Copy and fix files
     html_count = 0
     css_count = 0
@@ -84,7 +87,7 @@ def restore_from_archive(archive_dir: str, output_dir: str) -> str:
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
             if fname.endswith('.html') or fname.endswith('.htm'):
-                _copy_and_fix_html(src_path, dest_path, timestamp)
+                _copy_and_fix_html(src_path, dest_path, timestamp, site_domain)
                 html_count += 1
             elif fname.endswith('.css'):
                 _copy_and_fix_css(src_path, dest_path, timestamp)
@@ -157,7 +160,15 @@ def _find_site_root(snapshot_dir: str) -> str | None:
     return best
 
 
-def _copy_and_fix_html(src: str, dest: str, timestamp: str):
+def _extract_domain_from_path(path: str) -> str | None:
+    """Extract site domain from web.archive path like .../http[colon]kitcarsoncolorado.com/"""
+    normalized = path.replace('\uf03a', ':').replace('\\', '/')
+    # Archive paths use http:/ (single slash) on Windows, http:// elsewhere
+    m = re.search(r'https?:/+([^/\s]+)', normalized)
+    return m.group(1) if m else None
+
+
+def _copy_and_fix_html(src: str, dest: str, timestamp: str, site_domain: str | None = None):
     """Copy HTML file, removing web.archive injection and fixing paths."""
     try:
         with open(src, encoding='utf-8', errors='ignore') as f:
@@ -171,27 +182,26 @@ def _copy_and_fix_html(src: str, dest: str, timestamp: str):
         r'<!-- BEGIN WAYBACK TOOLBAR INSERT -->.*?<!-- END WAYBACK TOOLBAR INSERT -->',
         '', html, flags=re.DOTALL
     )
-    # Remove archive script tags
     html = re.sub(r'<script[^>]*src="[^"]*web\.archive\.org[^"]*"[^>]*>.*?</script>', '', html, flags=re.DOTALL)
     html = re.sub(r'<script[^>]*>\s*window\.RufflePlayer.*?</script>', '', html, flags=re.DOTALL)
 
-    # Fix archive URLs in href/src attributes
-    # /web/20220125170038/https://example.com/page → /page
-    html = re.sub(
-        r'(?:https?://web\.archive\.org)?/web/\d{14}(?:im_|cs_|js_)?/(https?://[^/"\']+)',
-        lambda m: '',
-        html
-    )
-    html = re.sub(
-        r'(?:https?://web\.archive\.org)?/web/\d{14}(?:im_|cs_|js_)?/https?://[^/"\']+(/[^"\']*)',
-        lambda m: m.group(1),
-        html
-    )
-    html = re.sub(
-        r'(?:https?://web\.archive\.org)?/web/\d{14}(?:im_|cs_|js_)?/https?://[^/"\']+/?(["\'])',
-        lambda m: '/' + m.group(1),
-        html
-    )
+    # Fix archive URLs: /web/TIMESTAMP[modifier]/https://domain/path
+    ARCHIVE_RE = r'(?:https?://web\.archive\.org)?/web/\d{14}(?:im_|cs_|js_)?/(https?://[^\s"\'<>]+)'
+
+    def fix_archive_url(m):
+        original = m.group(1)  # full original URL, e.g. https://fonts.googleapis.com/css?...
+        dm = re.match(r'https?://([^/?#]+)(.*)', original)
+        if not dm:
+            return ''
+        domain, path = dm.group(1), dm.group(2)
+        if site_domain and domain == site_domain:
+            # Same-domain resource → keep as relative path
+            return path if path else '/'
+        else:
+            # External resource (CDN, fonts, etc.) → restore full URL
+            return original
+
+    html = re.sub(ARCHIVE_RE, fix_archive_url, html)
 
     with open(dest, 'w', encoding='utf-8') as f:
         f.write(html)
@@ -221,8 +231,8 @@ def _archive_rel_to_local_path(rel: str) -> str | None:
     """
     Convert web.archive resource relative path to local site path.
     On Windows, ':' is stored as U+F03A and '?' as U+F03F.
-    e.g. 'http\uf03a\\kitcarsoncolorado.com\\wp-content\\themes\\style.css\uf03fver=1.4'
-    → 'wp-content/themes/style.css'
+    e.g. 'http[colon]kitcarsoncolorado.com/wp-content/themes/style.css[?]ver=1.4'
+    becomes 'wp-content/themes/style.css'
     """
     # Decode private-use chars back to ASCII
     normalized = rel.replace('\uf03a', ':').replace('\uf03f', '?').replace('\\', '/')

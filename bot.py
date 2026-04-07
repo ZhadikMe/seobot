@@ -94,7 +94,11 @@ INFO_TEXT = (
     'Каждый язык добавляется инкрементально — повторный запуск с другим языком '
     'не удалит предыдущие переводы.\n\n'
     '*Для PR нужен GitHub токен:*\n'
-    'github.com/settings/tokens → Classic → scope `repo`\n\n'
+    '1. Открой [github.com/settings/tokens](https://github.com/settings/tokens)\n'
+    '2. Нажми *Generate new token* → *Generate new token (classic)*\n'
+    '3. Дай любое название, например `seobot`\n'
+    '4. Поставь галочку на `repo` (первый пункт в списке)\n'
+    '5. Нажми *Generate token* и скопируй — он начинается с `ghp_`\n\n'
     '*Команды:*\n'
     '/start — начать\n'
     '/cancel — отменить\n'
@@ -149,6 +153,12 @@ async def got_repo(message: Message, state: FSMContext):
                              parse_mode='Markdown')
         return
 
+    # Clear previous session state before starting fresh
+    old_data = await state.get_data()
+    if old_data.get('tmp_dir'):
+        shutil.rmtree(old_data['tmp_dir'], ignore_errors=True)
+    await state.clear()
+
     repo_slug = m.group(1)
     await state.update_data(repo_url=url, repo_slug=repo_slug, selected_langs={'ru', 'de', 'fr', 'es'},
                             user_github_token=GITHUB_TOKEN)
@@ -180,9 +190,14 @@ async def chose_mode(callback: CallbackQuery, state: FSMContext):
         # Full mode — need GitHub token
         await callback.message.answer(
             '🔧 Режим: аудит + исправления + PR.\n\n'
-            '🔑 Отправь GitHub токен (`ghp_...`) — нужен для скачивания и создания PR.\n'
-            'Создать: [github.com/settings/tokens](https://github.com/settings/tokens) → Classic → scope `repo`\n\n'
-            '_Сообщение с токеном будет удалено сразу._',
+            '🔑 *Нужен GitHub токен* — для скачивания репо и создания PR.\n\n'
+            'Как получить:\n'
+            '1. Открой [github.com/settings/tokens](https://github.com/settings/tokens)\n'
+            '2. Нажми *Generate new token* → *Generate new token (classic)*\n'
+            '3. Дай любое название, например `seobot`\n'
+            '4. Поставь галочку на `repo` (первый пункт в списке)\n'
+            '5. Нажми *Generate token* → скопируй токен (начинается с `ghp_`)\n\n'
+            '_Сообщение с токеном будет удалено сразу после получения._',
             parse_mode='Markdown',
             reply_markup=token_keyboard()
         )
