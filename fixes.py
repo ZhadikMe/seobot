@@ -477,17 +477,129 @@ def fix_translations(site_dir: str, langs: list, groq_api_key: str):
 
 
 def fix_lang_switcher(site_dir: str):
-    """Run fix-translated-pages.py if it exists in the site."""
-    script = os.path.join(site_dir, 'scripts', 'fix-translated-pages.py')
-    if not os.path.exists(script):
-        return
-    subprocess.run(
-        [sys.executable, script],
-        cwd=site_dir,
-        capture_output=True,
-        text=True,
-        timeout=120
-    )
+    """
+    Inject a floating language switcher dropdown into every HTML page.
+    Detects available languages from subdirectories and builds relative links.
+    """
+    LANG_NAMES = {
+        'en': ('🇬🇧', 'English'),
+        'ru': ('🇷🇺', 'Русский'),
+        'de': ('🇩🇪', 'Deutsch'),
+        'fr': ('🇫🇷', 'Français'),
+        'es': ('🇪🇸', 'Español'),
+        'it': ('🇮🇹', 'Italiano'),
+        'pt': ('🇵🇹', 'Português'),
+        'zh': ('🇨🇳', '中文'),
+        'ja': ('🇯🇵', '日本語'),
+        'ko': ('🇰🇷', '한국어'),
+        'ar': ('🇸🇦', 'العربية'),
+        'nl': ('🇳🇱', 'Nederlands'),
+        'pl': ('🇵🇱', 'Polski'),
+        'tr': ('🇹🇷', 'Türkçe'),
+        'uk': ('🇺🇦', 'Українська'),
+    }
+
+    # Detect which languages actually exist as subdirectories
+    available_langs = ['en']  # English is always the root
+    for entry in sorted(os.listdir(site_dir)):
+        if entry in LANG_NAMES and os.path.isdir(os.path.join(site_dir, entry)):
+            available_langs.append(entry)
+
+    if len(available_langs) <= 1:
+        return  # Nothing to switch between
+
+    # Build CSS + JS (injected once per page)
+    SWITCHER_STYLE = """
+<style id="lang-switcher-style">
+#lang-switcher{position:fixed;bottom:20px;right:20px;z-index:9999;font-family:sans-serif}
+#lang-btn{background:#222;color:#fff;border:none;border-radius:24px;padding:8px 16px;
+  font-size:14px;cursor:pointer;display:flex;align-items:center;gap:6px;
+  box-shadow:0 2px 8px rgba(0,0,0,.35);transition:background .2s}
+#lang-btn:hover{background:#444}
+#lang-panel{display:none;position:absolute;bottom:44px;right:0;background:#fff;
+  border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.18);overflow:hidden;
+  min-width:160px;max-height:320px;overflow-y:auto}
+#lang-panel.open{display:block}
+.lang-item{display:flex;align-items:center;gap:8px;padding:10px 16px;
+  text-decoration:none;color:#222;font-size:14px;transition:background .15s}
+.lang-item:hover{background:#f5f5f5}
+.lang-item.active{background:#f0f7ff;font-weight:600}
+</style>"""
+
+    SWITCHER_JS = """
+<script id="lang-switcher-script">
+(function(){
+  var btn=document.getElementById('lang-btn');
+  var panel=document.getElementById('lang-panel');
+  if(!btn||!panel)return;
+  btn.addEventListener('click',function(e){e.stopPropagation();panel.classList.toggle('open');});
+  document.addEventListener('click',function(){panel.classList.remove('open');});
+})();
+</script>"""
+
+    # Walk all HTML files
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules', 'scripts']]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+
+            with open(fpath, encoding='utf-8', errors='ignore') as f:
+                html = f.read()
+
+            # Skip if already injected
+            if 'lang-switcher' in html:
+                continue
+
+            # Determine current page's language and slug
+            rel = os.path.relpath(fpath, site_dir).replace(os.sep, '/')
+            parts = rel.split('/')
+
+            # Depth from site_dir root (0 = root level)
+            depth = len(parts) - 1
+
+            # Is this page inside a lang subdir?
+            if depth >= 1 and parts[0] in LANG_NAMES:
+                current_lang = parts[0]
+                slug = '/'.join(parts[1:])  # e.g. "index.html" or "about/index.html"
+                to_root = '../' * depth
+            else:
+                current_lang = 'en'
+                slug = rel  # e.g. "index.html" or "about-us.html"
+                to_root = '../' * depth if depth > 0 else ''
+
+            # Build links for each language
+            flag, name = LANG_NAMES.get(current_lang, ('🌐', current_lang.upper()))
+            items_html = ''
+            for lang in available_langs:
+                lflag, lname = LANG_NAMES.get(lang, ('🌐', lang.upper()))
+                is_active = (lang == current_lang)
+
+                if lang == 'en':
+                    href = to_root + slug if to_root else slug
+                else:
+                    href = to_root + lang + '/' + slug
+
+                active_class = ' active' if is_active else ''
+                items_html += (
+                    f'<a href="{href}" class="lang-item{active_class}">'
+                    f'{lflag} {lname}</a>\n'
+                )
+
+            switcher_html = (
+                f'\n<div id="lang-switcher">'
+                f'<button id="lang-btn"><span>{flag}</span> {name} ▾</button>'
+                f'<div id="lang-panel">{items_html}</div>'
+                f'</div>\n'
+                + SWITCHER_JS
+            )
+
+            html = html.replace('</head>', SWITCHER_STYLE + '\n</head>', 1)
+            html = html.replace('</body>', switcher_html + '\n</body>', 1)
+
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(html)
 
 
 def _detect_base_url(site_dir: str) -> str:
