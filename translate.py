@@ -127,10 +127,16 @@ def extract_translatable(html):
     add(r'<meta\s+name=["\']twitter:title["\']\s+content="([^"]+)"')
     add(r'<meta\s+name=["\']twitter:description["\']\s+content="([^"]+)"')
 
-    # Headings (anywhere on page)
-    add(r'<h1[^>]*>([^<]+)</h1>')
-    for tag in ['h2', 'h3', 'h4']:
-        add(rf'<{tag}[^>]*>([^<]+)</{tag}>')
+    # Headings (anywhere on page) — strip inner tags to handle <h2><a>Title</a></h2>
+    for tag in ['h1', 'h2', 'h3', 'h4']:
+        for m in re.finditer(rf'<{tag}[^>]*>(.*?)</{tag}>', html, re.IGNORECASE | re.DOTALL):
+            # Strip child HTML tags but keep the raw text (with HTML entities) for replacement
+            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            if text and len(text) > 2 and not text.startswith('http'):
+                pos = m.start()
+                preceding = html[max(0, pos-200):pos]
+                if '<script' not in preceding and '<style' not in preceding:
+                    segments.append(text)
 
     # Paragraphs and list items inside main/article
     main_m = re.search(r'<(?:main|article)[^>]*>(.*?)</(?:main|article)>', html, re.DOTALL | re.IGNORECASE)
@@ -151,16 +157,20 @@ def extract_translatable(html):
         if not section_m:
             continue
         section_html = section_m.group(1)
-        # <a> link text
-        for m in re.finditer(r'<a[^>]*>([^<]{2,60})</a>', section_html, re.IGNORECASE):
-            text = m.group(1).strip()
-            if text and not text.startswith('http') and not re.match(r'^[\d\s.,:;!?]+$', text):
+        # <a> link text — strip inner tags (e.g. <a><span>Home</span></a>)
+        for m in re.finditer(r'<a[^>]*>(.*?)</a>', section_html, re.IGNORECASE | re.DOTALL):
+            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            if (2 <= len(text) <= 60
+                    and not text.startswith('http')
+                    and not re.match(r'^[\d\s.,:;!?]+$', text)):
                 segments.append(text)
-        # <button> and <span> text
+        # <button> and <span> text — strip inner tags too
         for tag in ('button', 'span'):
-            for m in re.finditer(rf'<{tag}[^>]*>([^<]{{2,80}})</{tag}>', section_html, re.IGNORECASE):
-                text = m.group(1).strip()
-                if text and not text.startswith('http') and not re.match(r'^[\d\s.,:;!?]+$', text):
+            for m in re.finditer(rf'<{tag}[^>]*>(.*?)</{tag}>', section_html, re.IGNORECASE | re.DOTALL):
+                text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+                if (2 <= len(text) <= 80
+                        and not text.startswith('http')
+                        and not re.match(r'^[\d\s.,:;!?]+$', text)):
                     segments.append(text)
 
     # "Continue reading", "Read more" style links anywhere
@@ -289,10 +299,26 @@ def patch_html(html, translations, lang, lang_name, original_rel_path):
 
     patched = html
 
-    # Replace translatable strings — longest first to avoid partial matches
+    # Replace translatable strings — longest first to avoid partial matches.
+    # Only replace inside tag content, NOT inside attribute values (href, src, etc.)
     for original, translated in sorted(translations.items(), key=lambda x: -len(x[0])):
-        if translated and original != translated:
-            patched = patched.replace(original, translated)
+        if not translated or original == translated:
+            continue
+        # Use regex to match only outside tag attributes:
+        # Replace the text between > and < (tag content) but not inside attr="..."
+        escaped = re.escape(original)
+        # Replace in text nodes (between tags)
+        patched = re.sub(
+            r'(>(?:[^<]*))' + escaped,
+            lambda m: m.group(1) + translated,
+            patched
+        )
+        # Also replace in content= attribute (meta descriptions, og:title etc.)
+        patched = re.sub(
+            r'(content=["\'])([^"\']*?)' + escaped,
+            lambda m: m.group(1) + m.group(2) + translated,
+            patched
+        )
 
     # Update <html lang="">
     patched = re.sub(r'(<html[^>]*)\blang=["\'][^"\']*["\']', rf'\1lang="{lang}"', patched)

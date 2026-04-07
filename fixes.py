@@ -671,7 +671,7 @@ def fix_lang_switcher(site_dir: str):
                 slug = rel  # e.g. "index.html" or "about-us.html"
                 to_root = '../' * depth if depth > 0 else ''
 
-            # Build links for each language
+            # Build links for each language — only include langs where this page exists
             flag, name = LANG_NAMES.get(current_lang, ('🌐', current_lang.upper()))
             items_html = ''
             for lang in available_langs:
@@ -680,7 +680,12 @@ def fix_lang_switcher(site_dir: str):
 
                 if lang == 'en':
                     href = to_root + slug if to_root else slug
+                    # English is always the canonical — include it
                 else:
+                    # Check this page actually exists in the lang dir before linking
+                    translated_path = os.path.join(site_dir, lang, slug.replace('/', os.sep))
+                    if not is_active and not os.path.exists(translated_path):
+                        continue  # Skip languages where this specific page doesn't exist
                     href = to_root + lang + '/' + slug
 
                 active_class = ' active' if is_active else ''

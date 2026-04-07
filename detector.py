@@ -22,9 +22,24 @@ def detect_and_normalize(repo_dir: str) -> tuple[str, str]:
     archive_dir = os.path.join(repo_dir, 'web.archive.org')
 
     # 1. site/ already populated — use it directly (respects previous fixes/translations)
+    #    BUT: if archive also exists and site/ has no stylesheets, force re-extraction
+    #    (this handles repos where a previous bot run deleted stylesheet links)
     if os.path.isdir(site_dir):
         html_count = len(glob.glob(os.path.join(site_dir, '**', '*.html'), recursive=True))
         if html_count > 0:
+            # Check if root HTML has stylesheet links — if not and archive exists, re-extract
+            root_html = os.path.join(site_dir, 'index.html')
+            if os.path.exists(root_html) and os.path.isdir(archive_dir):
+                import re as _re
+                with open(root_html, encoding='utf-8', errors='ignore') as _f:
+                    _content = _f.read()
+                css_count = len(_re.findall(r'<link[^>]+rel=["\']stylesheet["\']', _content, _re.IGNORECASE))
+                if css_count == 0:
+                    # Broken site/ — delete and re-extract from archive
+                    import shutil as _shutil
+                    _shutil.rmtree(site_dir)
+                    desc = restore_from_archive(archive_dir, site_dir)
+                    return site_dir, f'[Переизвлечено из архива — исправлен CSS]\n{desc}'
             return site_dir, f'Готовый сайт в site/ ({html_count} HTML файлов)'
 
     # 2. web.archive.org dump — first run, site/ is empty or missing
@@ -203,8 +218,10 @@ def _copy_and_fix_html(src: str, dest: str, timestamp: str, site_domain: str | N
                   '', html, flags=re.DOTALL)
     html = re.sub(r'<script[^>]*src="[^"]*(?:web-static\.archive\.org|web\.archive\.org)[^"]*"[^>]*>.*?</script>',
                   '', html, flags=re.DOTALL)
-    # 3. Archive CSS links (banner-styles, iconochive)
-    html = re.sub(r'<link[^>]*href="[^"]*(?:web-static\.archive\.org|web\.archive\.org)[^"]*"[^>]*/?>',
+    # 3. Archive CSS links (banner-styles, iconochive) — ONLY web-static.archive.org injections
+    # Do NOT remove web.archive.org/web/TIMESTAMP/ links — those are real stylesheets that
+    # need URL rewriting by ARCHIVE_RE below, not deletion
+    html = re.sub(r'<link[^>]*href="[^"]*web-static\.archive\.org[^"]*"[^>]*/?>',
                   '', html, flags=re.DOTALL)
     # 4. Inline __wm.init / __wm.wombat blocks
     html = re.sub(r'<script[^>]*>\s*__wm\.\w+\(.*?</script>', '', html, flags=re.DOTALL)

@@ -106,8 +106,8 @@ INFO_TEXT = (
     '5. Нажми *Generate token* и скопируй — он начинается с `ghp_`\n\n'
     '*Команды:*\n'
     '/start — начать\n'
-    '/cancel — отменить\n'
-    '/info — эта справка'
+    '/info — эта справка\n'
+    '_← Назад — вернуться к предыдущему шагу_'
 )
 
 
@@ -133,17 +133,82 @@ async def cmd_info(message: Message):
 
 
 @dp.message(Command('cancel'))
-@dp.message(F.text == '❌ Отменить')
+@dp.message(F.text == '← Назад')
 async def cmd_cancel(message: Message, state: FSMContext):
     global _processing_user_id
+    current_state = await state.get_state()
     data = await state.get_data()
-    tmp = data.get('tmp_dir')
-    if tmp and os.path.exists(tmp):
-        shutil.rmtree(tmp, ignore_errors=True)
-    if _processing_user_id == message.from_user.id:
-        _processing_user_id = None
-    await state.clear()
-    await message.answer('❌ Отменено.', reply_markup=main_keyboard())
+
+    # If processing — fully cancel and clean up
+    if current_state == SEOFlow.processing:
+        tmp = data.get('tmp_dir')
+        if tmp and os.path.exists(tmp):
+            shutil.rmtree(tmp, ignore_errors=True)
+        if _processing_user_id == message.from_user.id:
+            _processing_user_id = None
+        await state.clear()
+        await message.answer('❌ Обработка отменена.', reply_markup=main_keyboard())
+        return
+
+    # Back navigation based on current state
+    if current_state == SEOFlow.waiting_mode:
+        # Back to: enter repo URL
+        await state.clear()
+        await message.answer(
+            '📎 Отправь ссылку на GitHub репозиторий:\n`https://github.com/user/repo`',
+            parse_mode='Markdown', reply_markup=main_keyboard()
+        )
+        await state.set_state(SEOFlow.waiting_repo)
+
+    elif current_state == SEOFlow.waiting_domain:
+        # Back to: mode selection
+        await message.answer('Что хочешь сделать?', reply_markup=mode_keyboard())
+        await state.set_state(SEOFlow.waiting_mode)
+
+    elif current_state == SEOFlow.waiting_github_token:
+        # Back to: domain input
+        await message.answer(
+            '🌐 *Укажи домен сайта* (или Пропустить):',
+            parse_mode='Markdown', reply_markup=domain_keyboard()
+        )
+        await state.set_state(SEOFlow.waiting_domain)
+
+    elif current_state == SEOFlow.waiting_langs:
+        # Back to: token input (full) or domain (audit)
+        mode = data.get('mode', 'full')
+        if mode == 'full':
+            await message.answer(
+                '🔑 Введи GitHub токен (начинается с `ghp_`):',
+                parse_mode='Markdown', reply_markup=token_keyboard()
+            )
+            await state.set_state(SEOFlow.waiting_github_token)
+        else:
+            await message.answer(
+                '🌐 *Укажи домен сайта* (или Пропустить):',
+                parse_mode='Markdown', reply_markup=domain_keyboard()
+            )
+            await state.set_state(SEOFlow.waiting_domain)
+
+    elif current_state == SEOFlow.waiting_confirm:
+        # Back to: language selection
+        await message.answer(
+            '🌍 Выбери языки для перевода:',
+            reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
+        )
+        await state.set_state(SEOFlow.waiting_langs)
+
+    else:
+        # No active flow — clean up and restart
+        tmp = data.get('tmp_dir')
+        if tmp and os.path.exists(tmp):
+            shutil.rmtree(tmp, ignore_errors=True)
+        if _processing_user_id == message.from_user.id:
+            _processing_user_id = None
+        await state.clear()
+        await message.answer(
+            '📎 Отправь ссылку на GitHub репозиторий:\n`https://github.com/user/repo`',
+            parse_mode='Markdown', reply_markup=main_keyboard()
+        )
 
 
 def token_keyboard() -> InlineKeyboardMarkup:
@@ -161,7 +226,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
     """Persistent bottom keyboard shown after /start."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text='ℹ️ Info'), KeyboardButton(text='❌ Отменить')],
+            [KeyboardButton(text='ℹ️ Info'), KeyboardButton(text='← Назад')],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -423,6 +488,15 @@ async def run_audit(message: Message, state: FSMContext):
         _processing_user_id = None
         await state.clear()
         return
+
+    # If repo has a web.archive.org dump, always re-extract site/ from archive
+    # so we audit the original site state, not a potentially stale previous run.
+    archive_in_repo = os.path.join(tmp_dir, 'web.archive.org')
+    if os.path.isdir(archive_in_repo):
+        stale_site = os.path.join(tmp_dir, 'site')
+        if os.path.isdir(stale_site):
+            shutil.rmtree(stale_site)
+            log.info('Removed stale site/ — will re-extract from archive')
 
     # Detect and normalize structure
     await bot.edit_message_text(
