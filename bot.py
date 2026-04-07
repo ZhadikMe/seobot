@@ -36,10 +36,11 @@ dp  = Dispatcher(storage=MemoryStorage())
 # ── FSM States ────────────────────────────────────────────────────────────────
 
 class SEOFlow(StatesGroup):
-    waiting_repo    = State()
-    waiting_langs   = State()
-    waiting_confirm = State()
-    processing      = State()
+    waiting_repo         = State()
+    waiting_langs        = State()
+    waiting_confirm      = State()
+    waiting_github_token = State()
+    processing           = State()
 
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
@@ -249,8 +250,45 @@ async def handle_confirm(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer('👌 Окей, ничего не изменено.')
         return
 
+    # If no server-side token, ask the user for their GitHub token
+    if not GITHUB_TOKEN:
+        await callback.message.answer(
+            '🔑 Для создания Pull Request нужен GitHub токен.\n\n'
+            'Создай на [github.com/settings/tokens](https://github.com/settings/tokens) '
+            'токен с правами `repo` и отправь его сюда.\n\n'
+            '_Сообщение с токеном будет удалено сразу после получения._',
+            parse_mode='Markdown'
+        )
+        await state.set_state(SEOFlow.waiting_github_token)
+        return
+
     await state.set_state(SEOFlow.processing)
     await run_fixes(callback.message, state)
+
+
+@dp.message(SEOFlow.waiting_github_token)
+async def got_github_token(message: Message, state: FSMContext):
+    token = message.text.strip() if message.text else ''
+
+    if not token.startswith('ghp_') and not token.startswith('github_pat_'):
+        await message.answer(
+            '❌ Не похоже на GitHub токен (должен начинаться с `ghp_` или `github_pat_`).\n'
+            'Попробуй ещё раз.',
+            parse_mode='Markdown'
+        )
+        return
+
+    # Try to delete the message with the token for security
+    try:
+        await message.delete()
+    except Exception:
+        await message.answer(
+            '⚠️ Не могу удалить сообщение — удали его вручную для безопасности.',
+        )
+
+    await state.update_data(user_github_token=token)
+    await state.set_state(SEOFlow.processing)
+    await run_fixes(message, state)
 
 
 def _snapshot_files(site_dir: str) -> dict:
@@ -304,10 +342,11 @@ async def run_fixes(message: Message, state: FSMContext):
         except Exception as e:
             log.error(f'Fix step {step_key} failed: {e}')
 
-    # Create PR
+    # Create PR — use env token or user-provided token
+    effective_token = GITHUB_TOKEN or data.get('user_github_token')
     await bot.edit_message_text(text='🚀 Создаю Pull Request...', chat_id=message.chat.id, message_id=status.message_id)
 
-    pr_url = await create_pull_request(tmp_dir, site_dir, repo_slug, langs, files_before)
+    pr_url = await create_pull_request(tmp_dir, site_dir, repo_slug, langs, files_before, effective_token)
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     await state.clear()
@@ -328,10 +367,12 @@ async def run_fixes(message: Message, state: FSMContext):
 
 
 async def create_pull_request(
-    tmp_dir: str, site_dir: str, repo_slug: str, langs: list, files_before: dict
+    tmp_dir: str, site_dir: str, repo_slug: str, langs: list, files_before: dict,
+    token: str | None = None,
 ) -> str | None:
     """Create PR using GitHub Git Data API (no local git required)."""
-    if not GITHUB_TOKEN:
+    token = token or GITHUB_TOKEN
+    if not token:
         return None
 
     try:
@@ -339,7 +380,7 @@ async def create_pull_request(
         from datetime import datetime
         from github import Github, InputGitTreeElement
 
-        g = Github(GITHUB_TOKEN)
+        g = Github(token)
         gh_repo = g.get_repo(repo_slug)
         base_branch = gh_repo.default_branch
         base_commit = gh_repo.get_branch(base_branch).commit
