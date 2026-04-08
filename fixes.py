@@ -14,7 +14,7 @@ LANG_DIRS = ['ru', 'de', 'fr', 'es', 'it', 'pt']
 
 
 def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
-                  site_domain: str = None) -> dict:
+                  site_domain: str = None, wowai_key: str = None) -> dict:
     """Dispatcher — runs a specific fix step."""
     try:
         if step_key == 'fix_archive_scripts':
@@ -34,7 +34,7 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
         elif step_key == 'fix_hreflang_translated':
             fix_hreflang_translated(site_dir, langs, site_domain)
         elif step_key == 'fix_translations':
-            fix_translations(site_dir, langs, groq_api_key, site_domain)
+            fix_translations(site_dir, langs, wowai_key or groq_api_key, site_domain)
         elif step_key == 'fix_lang_switcher':
             fix_lang_switcher(site_dir)
         return {'ok': True}
@@ -548,7 +548,7 @@ def fix_hreflang_translated(site_dir: str, langs: list, site_domain: str = None)
                     f.write(html)
 
 
-def fix_translations(site_dir: str, langs: list, groq_api_key: str, site_domain: str = None):
+def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str = None):
     """Run translation script on the site directory."""
     translate_script = os.path.join(site_dir, 'scripts', 'translate.py')
     our_script = os.path.join(os.path.dirname(__file__), 'translate.py')
@@ -558,9 +558,12 @@ def fix_translations(site_dir: str, langs: list, groq_api_key: str, site_domain:
     os.makedirs(os.path.join(site_dir, 'scripts'), exist_ok=True)
     shutil.copy(our_script, translate_script)
 
+    if not api_key:
+        raise ValueError('Translation API key not provided (WOWAI_API_KEY)')
+
     cmd = [
         sys.executable, translate_script,
-        '--key', groq_api_key,
+        '--key', api_key,
         '--langs', ','.join(langs),
         '--skip-existing',
     ]
@@ -572,10 +575,11 @@ def fix_translations(site_dir: str, langs: list, groq_api_key: str, site_domain:
         cwd=site_dir,
         capture_output=True,
         text=True,
-        timeout=600
+        encoding='utf-8',
+        timeout=1800,  # 30 min — large sites need more time
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr[-500:] if result.stderr else 'Translation failed')
+        raise RuntimeError(result.stderr[-1000:] if result.stderr else 'Translation failed')
 
 
 def fix_lang_switcher(site_dir: str):

@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 GROQ_API_KEY   = os.getenv('GROQ_API_KEY')
 GITHUB_TOKEN   = os.getenv('GITHUB_TOKEN')
+WOWAI_KEY      = os.getenv('WOWAI_API_KEY', 'sk_trans_o5Un1stZ7eEG5uXovdDK_XlwzGHnqHd5lPJl9RxmA5U')
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
@@ -597,7 +598,7 @@ async def run_fixes(message: Message, state: FSMContext):
         await bot.edit_message_text(text=step_text, chat_id=message.chat.id, message_id=status.message_id)
         try:
             result = await loop.run_in_executor(
-                None, run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY, site_domain
+                None, run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY, site_domain, WOWAI_KEY
             )
             if not result['ok']:
                 await bot.edit_message_text(
