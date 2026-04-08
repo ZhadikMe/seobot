@@ -49,8 +49,8 @@ LANG_LOCALE = {
 # Pages to skip (noindex or not worth translating)
 SKIP_PAGES = {'/404.html', '/blog/new-suffolk/index.html'}
 
-# Groq model — fast and free
-MODEL = 'llama-3.1-8b-instant'
+# Groq model — 70b for quality translation (literary/artistic content)
+MODEL = 'llama-3.3-70b-versatile'
 
 # Anti-fake threshold (from MD guide: > 70% similarity = fake)
 FAKE_SIMILARITY_THRESHOLD = 0.70
@@ -139,16 +139,17 @@ def extract_translatable(html):
                     segments.append(text)
 
     # Paragraphs and list items inside main/article
+    # Strip inner tags first so <p>Text with <em>emphasis</em></p> is still extracted
     main_m = re.search(r'<(?:main|article)[^>]*>(.*?)</(?:main|article)>', html, re.DOTALL | re.IGNORECASE)
     if main_m:
         main_html = main_m.group(1)
-        for m in re.finditer(r'<p[^>]*>([^<]{20,})</p>', main_html, re.IGNORECASE):
-            text = m.group(1).strip()
-            if text and not text.startswith('http'):
+        for m in re.finditer(r'<p[^>]*>(.*?)</p>', main_html, re.IGNORECASE | re.DOTALL):
+            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            if len(text) >= 20 and not text.startswith('http'):
                 segments.append(text)
-        for m in re.finditer(r'<li[^>]*>([^<]{10,})</li>', main_html, re.IGNORECASE):
-            text = m.group(1).strip()
-            if text and not text.startswith('http'):
+        for m in re.finditer(r'<li[^>]*>(.*?)</li>', main_html, re.IGNORECASE | re.DOTALL):
+            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            if len(text) >= 10 and not text.startswith('http'):
                 segments.append(text)
 
     # Navigation, header, footer — short UI strings
@@ -173,8 +174,8 @@ def extract_translatable(html):
                         and not re.match(r'^[\d\s.,:;!?]+$', text)):
                     segments.append(text)
 
-    # "Continue reading", "Read more" style links anywhere
-    for m in re.finditer(r'<a[^>]*class="[^"]*(?:more|read-more|continue)[^"]*"[^>]*>([^<]+)</a>', html, re.IGNORECASE):
+    # "Read more", "Continue reading" links anywhere on the page (with or without class)
+    for m in re.finditer(r'<a[^>]*>\s*((?:Read more|Continue reading|More)[^<]{0,30})\s*</a>', html, re.IGNORECASE):
         text = m.group(1).strip()
         if text:
             segments.append(text)
@@ -300,25 +301,46 @@ def patch_html(html, translations, lang, lang_name, original_rel_path):
     patched = html
 
     # Replace translatable strings — longest first to avoid partial matches.
-    # Only replace inside tag content, NOT inside attribute values (href, src, etc.)
     for original, translated in sorted(translations.items(), key=lambda x: -len(x[0])):
         if not translated or original == translated:
             continue
-        # Use regex to match only outside tag attributes:
-        # Replace the text between > and < (tag content) but not inside attr="..."
         escaped = re.escape(original)
-        # Replace in text nodes (between tags)
+
+        # 1. Text nodes between tags: >...original...<
         patched = re.sub(
             r'(>(?:[^<]*))' + escaped,
-            lambda m: m.group(1) + translated,
+            lambda m, t=translated: m.group(1) + t,
             patched
         )
-        # Also replace in content= attribute (meta descriptions, og:title etc.)
+        # 2. content= attribute (meta description, og:title etc.)
         patched = re.sub(
             r'(content=["\'])([^"\']*?)' + escaped,
-            lambda m: m.group(1) + m.group(2) + translated,
+            lambda m, t=translated: m.group(1) + m.group(2) + t,
             patched
         )
+        # 3. Link text inside <a> tags that may have been missed by text node replacement
+        #    e.g. <a href="...">Read more →</a> or <a href="...">Post Title</a>
+        patched = re.sub(
+            r'(<a[^>]*>)([^<]*)' + escaped + r'([^<]*)(</a>)',
+            lambda m, t=translated: m.group(1) + m.group(2) + t + m.group(3) + m.group(4),
+            patched
+        )
+
+    # Fix internal links inside <a> tags: /blog/... → /{lang}/blog/...
+    # Only touches <a href="..."> — skips <link rel="canonical">, hreflang, og:url
+    def _fix_a_href(m):
+        pre, href, post = m.group(1), m.group(2), m.group(3)
+        # Skip if already has lang prefix
+        if re.match(r'^/(ru|de|fr|es|it|pt)/', href):
+            return m.group(0)
+        # Skip root-only slash (links to homepage stay as /{lang}/)
+        return f'{pre}href="/{lang}{href}"{post}'
+
+    patched = re.sub(
+        r'(<a\b[^>]*?\s)href="(/[^"#][^"]*)"([^>]*>)',
+        _fix_a_href,
+        patched
+    )
 
     # Update <html lang="">
     patched = re.sub(r'(<html[^>]*)\blang=["\'][^"\']*["\']', rf'\1lang="{lang}"', patched)
