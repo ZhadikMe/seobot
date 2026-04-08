@@ -161,6 +161,46 @@ def extract_translatable(html: str) -> list[str]:
 
 # ── HTML patching ─────────────────────────────────────────────────────────────
 
+def _is_flat_root(rel_path: str) -> bool:
+    """True if the file is a flat HTML in site root (e.g. /index.html, /about-us.html)."""
+    # Only one slash (the leading one) means it's directly in root
+    return rel_path.count('/') == 1
+
+
+def _fix_flat_resources(html: str) -> str:
+    """
+    For flat HTML files translated into a /lang/ subdirectory,
+    prefix all relative resource paths (CSS/JS/images) with ../
+    so they resolve correctly from one level deeper.
+    Navigation links (*.html) are left untouched.
+    """
+    def fix_attr(m):
+        attr_eq_quote = m.group(1)  # e.g. href="  or  src="
+        path = m.group(2)
+        closing_quote = m.group(3)
+        # Skip already absolute, anchor, data URIs
+        if path.startswith(('http', '/', '#', 'data:', '..')):
+            return m.group(0)
+        # Skip .html navigation links — they work naturally relative to /lang/
+        if re.search(r'\.html?(\?|#|$)', path):
+            return m.group(0)
+        return f'{attr_eq_quote}../{path}{closing_quote}'
+
+    # <link href="...">, <script src="...">, <img src="...">, <source src="...">, <input src="...">
+    html = re.sub(r'(<link[^>]+href=")([^"]+)(")', fix_attr, html)
+    html = re.sub(r'(<link[^>]+href=\')([^\']+)(\')', fix_attr, html)
+    html = re.sub(r'(<script[^>]+src=")([^"]+)(")', fix_attr, html)
+    html = re.sub(r'(<img[^>]+src=")([^"]+)(")', fix_attr, html)
+    html = re.sub(r'(<source[^>]+src=")([^"]+)(")', fix_attr, html)
+    # background images in inline style
+    html = re.sub(
+        r'(url\(["\']?)(?!http|/|data:)([^"\')\s]+)(["\']?\))',
+        lambda m: m.group(1) + '../' + m.group(2) + m.group(3),
+        html
+    )
+    return html
+
+
 def patch_html(html: str, translations: dict, lang: str, original_rel_path: str) -> str:
     """Apply translations to HTML, update lang/hreflang/canonical/og:locale."""
     patched = html
@@ -190,7 +230,7 @@ def patch_html(html: str, translations: dict, lang: str, original_rel_path: str)
             patched
         )
 
-    # Fix internal links: /path → /{lang}/path
+    # Fix absolute internal links: /path → /{lang}/path
     def _fix_a_href(m):
         pre, href, post = m.group(1), m.group(2), m.group(3)
         if re.match(r'^/(ru|de|fr|es|it|pt)/', href):
@@ -202,6 +242,10 @@ def patch_html(html: str, translations: dict, lang: str, original_rel_path: str)
         _fix_a_href,
         patched
     )
+
+    # Fix relative resource paths for flat-root HTML moved into /lang/ subdir
+    if _is_flat_root(original_rel_path):
+        patched = _fix_flat_resources(patched)
 
     # Update <html lang="">
     patched = re.sub(r'(<html[^>]*)\blang=["\'][^"\']*["\']', rf'\1lang="{lang}"', patched)
@@ -275,15 +319,27 @@ def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: lis
 
     confirmed_langs = []
 
+    # Determine output path: flat HTML keeps filename, subdir HTML → index.html
+    src_fname = os.path.basename(rel_path)  # e.g. 'about-us.html' or 'index.html'
+    is_flat   = _is_flat_root(rel_path)     # True for /about-us.html, /index.html
+
     for lang in target_langs:
-        # Skip if translated file already exists
-        if skip_existing and not dry_run:
+        # Compute correct output path
+        if is_flat and src_fname != 'index.html':
+            # e.g. /about-us.html → site/ru/about-us.html
+            out_dir  = os.path.join(SITE, lang)
+            out_path = os.path.join(out_dir, src_fname)
+        else:
+            # e.g. /blog/post/index.html → site/ru/blog/post/index.html
             page_dir = os.path.dirname(rel_path.lstrip('/'))
-            out_path = os.path.join(SITE, lang, page_dir, 'index.html')
-            if os.path.exists(out_path):
-                print(f'    → {lang}: skip (exists)')
-                confirmed_langs.append(lang)
-                continue
+            out_dir  = os.path.join(SITE, lang, page_dir)
+            out_path = os.path.join(out_dir, 'index.html')
+
+        # Skip if translated file already exists
+        if skip_existing and not dry_run and os.path.exists(out_path):
+            print(f'    → {lang}: skip (exists)')
+            confirmed_langs.append(lang)
+            continue
 
         print(f'    → {lang}...', end=' ', flush=True)
 
@@ -302,11 +358,7 @@ def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: lis
 
         translated_html = patch_html(html, translations, lang, rel_path)
 
-        page_dir = os.path.dirname(rel_path.lstrip('/'))
-        out_dir  = os.path.join(SITE, lang, page_dir)
         os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, 'index.html')
-
         with open(out_path, 'w', encoding='utf-8') as f:
             f.write(translated_html)
 
