@@ -79,6 +79,22 @@ def translate_batch(api_key: str, segments: list[str], target_lang: str, retries
 
 # ── Text extraction from HTML ─────────────────────────────────────────────────
 
+def _extract_text_nodes(inner_html: str, segments: list, min_len: int = 10):
+    """
+    Extract individual direct text nodes from an HTML fragment.
+    This ensures each segment is a single contiguous text node that can be
+    found and replaced in the original HTML (even when inner tags like <br>/<span> exist).
+    """
+    # Split by tags; odd-indexed items are text nodes
+    parts = re.split(r'<[^>]+>', inner_html)
+    for part in parts:
+        text = re.sub(r'\s+', ' ', part).strip()
+        if (len(text) >= min_len
+                and not text.startswith('http')
+                and not re.match(r'^[\W\d]+$', text)):
+            segments.append(text)
+
+
 def extract_translatable(html: str) -> list[str]:
     """
     Extract text segments that need translation.
@@ -118,22 +134,39 @@ def extract_translatable(html: str) -> list[str]:
     # Paragraphs and list items inside main/article
     main_m = re.search(r'<(?:main|article)[^>]*>(.*?)</(?:main|article)>', html, re.DOTALL | re.IGNORECASE)
     if main_m:
-        main_html = main_m.group(1)
-        for m in re.finditer(r'<p[^>]*>(.*?)</p>', main_html, re.IGNORECASE | re.DOTALL):
-            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
-            if len(text) >= 20 and not text.startswith('http'):
-                segments.append(text)
-        for m in re.finditer(r'<li[^>]*>(.*?)</li>', main_html, re.IGNORECASE | re.DOTALL):
-            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
-            if len(text) >= 10 and not text.startswith('http'):
-                segments.append(text)
+        content_html = main_m.group(1)
+    else:
+        # Fallback for div-based layouts (no <main>/<article>): use entire <body>
+        body_m = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
+        if body_m:
+            # Strip script/style blocks before extracting text
+            content_html = re.sub(
+                r'<(script|style)[^>]*>.*?</(script|style)>', '', body_m.group(1),
+                flags=re.DOTALL | re.IGNORECASE
+            )
+        else:
+            content_html = None
+    if content_html:
+        for m in re.finditer(r'<p[^>]*>(.*?)</p>', content_html, re.IGNORECASE | re.DOTALL):
+            _extract_text_nodes(m.group(1), segments, min_len=15)
+        for m in re.finditer(r'<li[^>]*>(.*?)</li>', content_html, re.IGNORECASE | re.DOTALL):
+            _extract_text_nodes(m.group(1), segments, min_len=8)
 
     # Navigation, header, footer — short UI strings
+    # Also handles div-based navs: <div id/class containing nav/menu/navbar>
+    nav_sections = []
     for section_tag in ('nav', 'header', 'footer'):
-        section_m = re.search(rf'<{section_tag}[^>]*>(.*?)</{section_tag}>', html, re.DOTALL | re.IGNORECASE)
-        if not section_m:
-            continue
-        section_html = section_m.group(1)
+        m = re.search(rf'<{section_tag}[^>]*>(.*?)</{section_tag}>', html, re.DOTALL | re.IGNORECASE)
+        if m:
+            nav_sections.append(m.group(1))
+    # Div-based nav fallback: <div id="navbar">, <div class="nav">, etc.
+    for m in re.finditer(
+        r'<div[^>]+(?:id|class)=["\'][^"\']*(?:nav|menu|navbar)[^"\']*["\'][^>]*>(.*?)</div>',
+        html, re.DOTALL | re.IGNORECASE
+    ):
+        nav_sections.append(m.group(1))
+
+    for section_html in nav_sections:
         for m in re.finditer(r'<a[^>]*>(.*?)</a>', section_html, re.IGNORECASE | re.DOTALL):
             text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
             if (2 <= len(text) <= 60
