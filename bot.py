@@ -53,9 +53,12 @@ class SEOFlow(StatesGroup):
 # ── Keyboards ─────────────────────────────────────────────────────────────────
 
 def langs_keyboard(selected: set) -> InlineKeyboardMarkup:
-    options = ['ru', 'de', 'fr', 'es', 'it', 'pt']
-    labels  = {'ru': '🇷🇺 RU', 'de': '🇩🇪 DE', 'fr': '🇫🇷 FR',
-               'es': '🇪🇸 ES', 'it': '🇮🇹 IT', 'pt': '🇵🇹 PT'}
+    options = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
+    labels  = {
+        'ru': '🇷🇺 RU', 'de': '🇩🇪 DE', 'fr': '🇫🇷 FR', 'es': '🇪🇸 ES',
+        'it': '🇮🇹 IT', 'pt': '🇵🇹 PT', 'pl': '🇵🇱 PL', 'nl': '🇳🇱 NL',
+        'cs': '🇨🇿 CS', 'ro': '🇷🇴 RO', 'sv': '🇸🇪 SV', 'tr': '🇹🇷 TR',
+    }
     buttons = []
     for lang in options:
         label = ('✅ ' if lang in selected else '') + labels[lang]
@@ -582,6 +585,7 @@ async def run_fixes(message: Message, state: FSMContext):
     steps = [
         ('🧹 Очищаю archive.org скрипты...', 'fix_archive_scripts'),
         ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
+        ('📅 Обновляю год в заголовках...', 'fix_title_refresh'),
         ('📝 Генерирую уникальные descriptions...', 'fix_descriptions'),
         ('🗂️ Добавляю Schema.org (BreadcrumbList)...', 'fix_schema'),
         ('🖼️ Добавляю OG images...', 'fix_og_image'),

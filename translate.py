@@ -30,6 +30,12 @@ SUPPORTED_LANGS = {
     'es': 'ES',
     'it': 'IT',
     'pt': 'PT',
+    'pl': 'PL',
+    'nl': 'NL',
+    'cs': 'CS',
+    'ro': 'RO',
+    'sv': 'SV',
+    'tr': 'TR',
 }
 
 LANG_LOCALE = {
@@ -39,6 +45,27 @@ LANG_LOCALE = {
     'es': 'es_ES',
     'it': 'it_IT',
     'pt': 'pt_PT',
+    'pl': 'pl_PL',
+    'nl': 'nl_NL',
+    'cs': 'cs_CZ',
+    'ro': 'ro_RO',
+    'sv': 'sv_SE',
+    'tr': 'tr_TR',
+}
+
+LANG_NAME = {
+    'ru': ('🇷🇺', 'Русский'),
+    'de': ('🇩🇪', 'Deutsch'),
+    'fr': ('🇫🇷', 'Français'),
+    'es': ('🇪🇸', 'Español'),
+    'it': ('🇮🇹', 'Italiano'),
+    'pt': ('🇵🇹', 'Português'),
+    'pl': ('🇵🇱', 'Polski'),
+    'nl': ('🇳🇱', 'Nederlands'),
+    'cs': ('🇨🇿', 'Čeština'),
+    'ro': ('🇷🇴', 'Română'),
+    'sv': ('🇸🇪', 'Svenska'),
+    'tr': ('🇹🇷', 'Türkçe'),
 }
 
 # Languages that use non-Latin scripts — fake detection via character ratio

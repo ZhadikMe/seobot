@@ -13,7 +13,7 @@ def run_audit_on_dir(site_dir: str) -> dict:
     Audit all HTML pages in site_dir.
     Returns: {total, passed, failed, issues: [...]}
     """
-    LANGS = ['ru', 'de', 'fr', 'es', 'it', 'pt']
+    LANGS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
 
     pages = []
     for root, dirs, files in os.walk(site_dir):

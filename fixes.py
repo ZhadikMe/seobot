@@ -10,7 +10,7 @@ import subprocess
 import json
 
 
-LANG_DIRS = ['ru', 'de', 'fr', 'es', 'it', 'pt']
+LANG_DIRS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
 
 
 def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
@@ -37,6 +37,8 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
             fix_translations(site_dir, langs, wowai_key or groq_api_key, site_domain)
         elif step_key == 'fix_internal_links':
             fix_internal_links(site_dir)
+        elif step_key == 'fix_title_refresh':
+            fix_title_refresh(site_dir)
         elif step_key == 'fix_lang_switcher':
             fix_lang_switcher(site_dir)
         return {'ok': True}
@@ -595,6 +597,56 @@ def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str 
         raise RuntimeError(result.stderr[-1000:] if result.stderr else 'Translation failed')
 
 
+def fix_title_refresh(site_dir: str):
+    """
+    Update year references in title and meta description across all HTML pages
+    (EN and translated). Replaces the previous year with the current year.
+    Ported from HELP project's title-refresh.js.
+    """
+    import datetime
+    current_year = datetime.datetime.now().year
+    prev_year    = current_year - 1
+
+    if prev_year == current_year:
+        return
+
+    year_pattern = re.compile(r'\b' + str(prev_year) + r'\b')
+    updated = 0
+
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            with open(fpath, encoding='utf-8', errors='ignore') as f:
+                html = f.read()
+
+            original = html
+
+            def refresh_attr(m):
+                """Replace year only inside content="" and <title> values."""
+                return year_pattern.sub(str(current_year), m.group(0))
+
+            # Only update year inside <title> tags
+            html = re.sub(r'<title>[^<]+</title>', refresh_attr, html)
+            # Only update year inside meta name="description" content="..."
+            html = re.sub(
+                r'(<meta[^>]*name=["\']description["\'][^>]*content=")[^"]*(")',
+                refresh_attr, html, flags=re.IGNORECASE
+            )
+            # Only update year inside og:title and og:description content
+            html = re.sub(
+                r'(<meta[^>]*property=["\']og:(?:title|description)["\'][^>]*content=")[^"]*(")',
+                refresh_attr, html, flags=re.IGNORECASE
+            )
+
+            if html != original:
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    f.write(html)
+                updated += 1
+
+
 def fix_internal_links(site_dir: str):
     """
     Auto-linker: insert 2-3 contextual internal links per page.
@@ -613,7 +665,7 @@ def fix_internal_links(site_dir: str):
         'all','also','more','other','new','use','used','using','get','our',
         'page','click','here','read','view','find','see','learn','check',
     }
-    LANG_DIRS = {'ru', 'de', 'fr', 'es', 'it', 'pt'}
+    LANG_DIRS = {'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr'}
     SKIP_DIRS = LANG_DIRS | {'scripts', 'images', 'css', '.git', 'node_modules'}
 
     # ── Step 1: collect all EN HTML pages ──
@@ -764,6 +816,9 @@ def fix_lang_switcher(site_dir: str):
         'pl': ('🇵🇱', 'Polski'),
         'tr': ('🇹🇷', 'Türkçe'),
         'uk': ('🇺🇦', 'Українська'),
+        'cs': ('🇨🇿', 'Čeština'),
+        'ro': ('🇷🇴', 'Română'),
+        'sv': ('🇸🇪', 'Svenska'),
     }
 
     # Detect which languages actually exist as subdirectories
