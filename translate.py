@@ -516,12 +516,17 @@ def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: lis
 
         confirmed_langs.append(lang)
 
-    # Update original EN page with hreflang
+    # Update original EN page with hreflang — merge with existing langs to avoid
+    # losing translations from previous runs (e.g. re-run with different languages)
     if confirmed_langs and not dry_run:
-        updated_html = add_hreflang(html, rel_path, confirmed_langs)
+        existing_langs = re.findall(
+            r'<link[^>]*hreflang=["\']([a-z]{2})["\'][^>]*>', html, re.IGNORECASE
+        )
+        all_langs = sorted(set(existing_langs + confirmed_langs) - {'en', 'x-default', 'x'})
+        updated_html = add_hreflang(html, rel_path, all_langs)
         with open(src_path, 'w', encoding='utf-8') as f:
             f.write(updated_html)
-        print(f'    hreflang → EN page: {confirmed_langs}')
+        print(f'    hreflang → EN page: {all_langs}')
 
     return confirmed_langs
 

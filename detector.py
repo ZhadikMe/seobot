@@ -44,6 +44,19 @@ def detect_and_normalize(repo_dir: str) -> tuple[str, str]:
 
     # 2. web.archive.org dump — first run, site/ is empty or missing
     if os.path.isdir(archive_dir):
+        # If lang subdirectories already exist in repo root, the site was previously
+        # processed and files were pushed flat to root (no site/ subfolder).
+        # Re-extracting from archive would discard all merged fixes — use root instead.
+        LANGS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
+        lang_dirs_in_root = [d for d in LANGS if os.path.isdir(os.path.join(repo_dir, d))]
+        if lang_dirs_in_root:
+            root_html = glob.glob(os.path.join(repo_dir, '*.html'))
+            root_html += glob.glob(os.path.join(repo_dir, '*', 'index.html'))
+            html_count = len(root_html)
+            return repo_dir, (
+                f'Сайт уже обработан (языки: {", ".join(lang_dirs_in_root)}), '
+                f'HTML в корне ({html_count} файлов) — пропускаем переизвлечение'
+            )
         desc = restore_from_archive(archive_dir, site_dir)
         return site_dir, desc
 
