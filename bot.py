@@ -544,8 +544,9 @@ async def run_audit(message: Message, state: FSMContext):
         await state.clear()
         await message.answer('✅ Аудит завершён. Отправь новую ссылку для следующего сайта.')
     else:
+        time_est = estimate_processing_time(site_dir, langs)
         await message.answer(
-            '📋 _Аудит показывает состояние сайта ДО исправлений — это список задач для бота._\n\n'
+            f'⏱ *Примерное время обработки:* `{time_est}`\n\n'
             '🔧 Запустить автоисправление и создать Pull Request?',
             parse_mode='Markdown',
             reply_markup=confirm_keyboard()
@@ -599,12 +600,29 @@ async def run_fixes(message: Message, state: FSMContext):
     ]
 
     from fixes import run_all_fixes
+    import functools
     site_domain = data.get('site_domain')
     for step_text, step_key in steps:
         await bot.edit_message_text(text=step_text, chat_id=message.chat.id, message_id=status.message_id)
         try:
+            progress_cb = None
+            if step_key == 'fix_translations':
+                _chat_id = message.chat.id
+                _msg_id = status.message_id
+                def progress_cb(done, total, chat_id=_chat_id, msg_id=_msg_id):
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(
+                            text=f'🌍 Перевод: {done}/{total} страниц...',
+                            chat_id=chat_id,
+                            message_id=msg_id,
+                        ),
+                        loop,
+                    )
             result = await loop.run_in_executor(
-                None, run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY, site_domain, WOWAI_KEY
+                None, functools.partial(
+                    run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY,
+                    site_domain, WOWAI_KEY, progress_cb
+                )
             )
             if not result['ok']:
                 await bot.edit_message_text(
@@ -769,6 +787,51 @@ async def create_pull_request(
 
 
 # ── Audit report formatter ────────────────────────────────────────────────────
+
+def estimate_processing_time(site_dir: str, langs: list) -> str:
+    """
+    Estimate translation time based on page word counts and language count.
+    Calibrated from real speedcarrace run: ~4 min per real page × 6 langs.
+    """
+    LANGS_REF = 6
+    MIN_PER_REAL_PAGE_6L = 4.0   # empirical: 4 min per ~50-seg page × 6 langs
+    MIN_PER_STUB_6L = 0.2        # stubs are near-instant
+
+    LANG_DIRS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
+    real = 0
+    stubs = 0
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in LANG_DIRS + ['.git', 'node_modules', 'scripts', 'images', 'css']]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, encoding='utf-8', errors='ignore') as f:
+                    html = f.read()
+                body_m = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
+                if body_m:
+                    body = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', body_m.group(1),
+                                  flags=re.DOTALL | re.IGNORECASE)
+                    text = re.sub(r'<[^>]+>', ' ', body)
+                    words = len(text.split())
+                    if words >= 50:
+                        real += 1
+                    else:
+                        stubs += 1
+                else:
+                    stubs += 1
+            except Exception:
+                stubs += 1
+
+    n = len(langs)
+    scale = n / LANGS_REF
+    minutes = (real * MIN_PER_REAL_PAGE_6L + stubs * MIN_PER_STUB_6L) * scale
+    lo = max(1, int(minutes * 0.85))
+    hi = int(minutes * 1.2)
+    total = real + stubs
+    return f'~{lo}–{hi} мин ({total} стр. × {n} яз., {real} с контентом)'
+
 
 def format_audit_report(results: dict, repo_slug: str, langs: list) -> str:
     total  = results.get('total', 0)

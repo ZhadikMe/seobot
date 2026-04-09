@@ -14,7 +14,8 @@ LANG_DIRS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', '
 
 
 def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
-                  site_domain: str = None, wowai_key: str = None) -> dict:
+                  site_domain: str = None, wowai_key: str = None,
+                  progress_callback=None) -> dict:
     """Dispatcher — runs a specific fix step."""
     try:
         if step_key == 'fix_archive_scripts':
@@ -34,7 +35,8 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
         elif step_key == 'fix_hreflang_translated':
             fix_hreflang_translated(site_dir, langs, site_domain)
         elif step_key == 'fix_translations':
-            fix_translations(site_dir, langs, wowai_key or groq_api_key, site_domain)
+            fix_translations(site_dir, langs, wowai_key or groq_api_key, site_domain,
+                             progress_callback)
         elif step_key == 'fix_internal_links':
             fix_internal_links(site_dir)
         elif step_key == 'fix_title_refresh':
@@ -563,7 +565,19 @@ def fix_hreflang_translated(site_dir: str, langs: list, site_domain: str = None)
                     f.write(html)
 
 
-def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str = None):
+def _count_translatable_pages(site_dir: str) -> int:
+    """Count HTML pages that will be translated (excluding lang dirs)."""
+    count = 0
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in LANG_DIRS + ['.git', 'node_modules', 'scripts']]
+        for fname in files:
+            if fname.endswith('.html'):
+                count += 1
+    return count
+
+
+def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str = None,
+                     progress_callback=None):
     """Run translation script on the site directory."""
     translate_script = os.path.join(site_dir, 'scripts', 'translate.py')
     our_script = os.path.join(os.path.dirname(__file__), 'translate.py')
@@ -588,6 +602,9 @@ def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str 
     import logging
     _log = logging.getLogger(__name__)
 
+    total_pages = _count_translatable_pages(site_dir) if progress_callback else 0
+    done_pages = 0
+
     # Run with stdout streamed line-by-line so Railway logs show translation progress
     proc = subprocess.Popen(
         cmd,
@@ -606,6 +623,12 @@ def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str 
                 stderr_tail.append(line)
                 if len(stderr_tail) > 50:
                     stderr_tail.pop(0)
+                if progress_callback and 'hreflang' in line and 'EN page' in line:
+                    done_pages += 1
+                    try:
+                        progress_callback(done_pages, total_pages)
+                    except Exception:
+                        pass
         proc.wait(timeout=1800)
     except subprocess.TimeoutExpired:
         proc.kill()
