@@ -585,16 +585,34 @@ def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str 
     if site_domain:
         cmd += ['--base-url', site_domain.rstrip('/')]
 
-    result = subprocess.run(
+    import logging
+    _log = logging.getLogger(__name__)
+
+    # Run with stdout streamed line-by-line so Railway logs show translation progress
+    proc = subprocess.Popen(
         cmd,
         cwd=site_dir,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
         encoding='utf-8',
-        timeout=1800,  # 30 min — large sites need more time
     )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr[-1000:] if result.stderr else 'Translation failed')
+    stderr_tail = []
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                _log.info('[translate] %s', line)
+                stderr_tail.append(line)
+                if len(stderr_tail) > 50:
+                    stderr_tail.pop(0)
+        proc.wait(timeout=1800)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise RuntimeError('Translation timed out after 30 minutes')
+    if proc.returncode != 0:
+        tail = '\n'.join(stderr_tail[-20:])
+        raise RuntimeError(f'Translation failed (exit {proc.returncode}):\n{tail}')
 
 
 def fix_title_refresh(site_dir: str):
