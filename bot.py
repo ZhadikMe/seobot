@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import sys
+import subprocess
 import tempfile
 import shutil
 import re
@@ -613,8 +614,8 @@ async def run_fixes(message: Message, state: FSMContext):
         except Exception as e:
             log.error(f'Fix step {step_key} failed: {e}')
 
-    # Create PR — use env token or user-provided token
-    effective_token = GITHUB_TOKEN or data.get('user_github_token')
+    # Create PR — user-provided token takes priority over env var
+    effective_token = data.get('user_github_token') or GITHUB_TOKEN
     await bot.edit_message_text(text='🚀 Создаю Pull Request...', chat_id=message.chat.id, message_id=status.message_id)
 
     pr_url = await create_pull_request(tmp_dir, site_dir, repo_slug, langs, {}, effective_token)
@@ -630,10 +631,18 @@ async def run_fixes(message: Message, state: FSMContext):
                   f'Проверь изменения и нажми Merge.'),
             chat_id=message.chat.id, message_id=status.message_id, parse_mode='Markdown'
         )
+    elif not effective_token:
+        await bot.edit_message_text(
+            text=('✅ *Исправления применены локально.*\n\n'
+                  '⚠️ PR не создан — токен не введён.'),
+            chat_id=message.chat.id, message_id=status.message_id, parse_mode='Markdown'
+        )
     else:
         await bot.edit_message_text(
             text=('✅ *Исправления применены локально.*\n\n'
-                  '⚠️ PR не создан — нужен GITHUB\\_TOKEN в настройках бота.'),
+                  '❌ PR не создан — ошибка GitHub API. '
+                  'Проверь что токен действителен и имеет права `repo`. '
+                  'Подробности в логах Railway.'),
             chat_id=message.chat.id, message_id=status.message_id, parse_mode='Markdown'
         )
 
@@ -642,90 +651,23 @@ async def create_pull_request(
     tmp_dir: str, site_dir: str, repo_slug: str, langs: list, files_before: dict,
     token: str | None = None,
 ) -> str | None:
-    """Create PR using GitHub Git Data API — uploads all site files every time."""
+    """
+    Create PR via git clone → commit → push → GitHub API PR creation.
+    Works for any repo size — no GitHub API tree size limits.
+    """
     token = token or GITHUB_TOKEN
     if not token:
         return None
 
-    # Skip extensions that are too large or irrelevant for the site
-    SKIP_EXTENSIONS = {'.zip', '.tar', '.gz', '.rar', '.7z', '.mp4', '.mp3', '.mov', '.avi'}
-
-    def _git_blob_sha(data: bytes) -> str:
-        import hashlib
-        header = f'blob {len(data)}\0'.encode()
-        return hashlib.sha1(header + data).hexdigest()
-
     try:
-        import base64, hashlib
+        import shutil
         from datetime import datetime
-        from github import Github, InputGitTreeElement
+        from github import Github, Auth
 
-        g = Github(token)
+        # ── Determine branch name ──────────────────────────────────────────────
+        g = Github(auth=Auth.Token(token))
         gh_repo = g.get_repo(repo_slug)
         base_branch = gh_repo.default_branch
-        base_commit = gh_repo.get_branch(base_branch).commit
-
-        # Fetch existing tree SHAs — skip files whose content is already identical
-        try:
-            full_tree = gh_repo.get_git_tree(base_commit.commit.tree.sha, recursive=True)
-            existing_shas = {item.path: item.sha for item in full_tree.tree if item.type == 'blob'}
-            log.info(f'Repo has {len(existing_shas)} existing files')
-        except Exception as e:
-            log.warning(f'Could not fetch repo tree: {e}')
-            existing_shas = {}
-
-        tree_elements = []
-        skipped = 0
-        for root, dirs, files in os.walk(site_dir):
-            dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules')]
-            for fname in files:
-                ext = os.path.splitext(fname)[1].lower()
-                if ext in SKIP_EXTENSIONS:
-                    skipped += 1
-                    continue
-                fpath = os.path.join(root, fname)
-                rel_in_repo = os.path.relpath(fpath, tmp_dir).replace(os.sep, '/')
-                try:
-                    content = Path(fpath).read_bytes()
-                    if len(content) > 5 * 1024 * 1024:
-                        log.warning(f'Skipping large file: {rel_in_repo} ({len(content)//1024}KB)')
-                        skipped += 1
-                        continue
-                    # Skip if GitHub already has identical content (saves API calls + time)
-                    if existing_shas.get(rel_in_repo) == _git_blob_sha(content):
-                        skipped += 1
-                        continue
-                    blob = gh_repo.create_git_blob(
-                        base64.b64encode(content).decode(), 'base64'
-                    )
-                    tree_elements.append(InputGitTreeElement(
-                        path=rel_in_repo, mode='100644', type='blob', sha=blob.sha
-                    ))
-                except Exception as e:
-                    log.warning(f'Skipping {rel_in_repo}: {e}')
-                    skipped += 1
-
-        log.info(f'PR: {len(tree_elements)} changed files, {skipped} unchanged/skipped')
-
-        if not tree_elements:
-            log.info('No changed files — skipping PR')
-            return None
-
-        log.info(f'Creating PR with {len(tree_elements)} changed files')
-
-        # Create tree → commit → branch → PR
-        new_tree = gh_repo.create_git_tree(
-            tree_elements, base_tree=base_commit.commit.tree
-        )
-        new_commit = gh_repo.create_git_commit(
-            message=(
-                f'SEO fixes: translations ({", ".join(langs)}), schema, meta\n\n'
-                f'Auto-generated by SEO Bot\n'
-                f'Files changed: {len(tree_elements)}'
-            ),
-            tree=new_tree,
-            parents=[base_commit.commit],
-        )
 
         branch_name = 'seo-fixes'
         try:
@@ -734,8 +676,76 @@ async def create_pull_request(
         except Exception:
             pass
 
-        gh_repo.create_git_ref(f'refs/heads/{branch_name}', new_commit.sha)
+        # ── Clone repo into a fresh directory ─────────────────────────────────
+        clone_dir = os.path.join(tmp_dir, '_git_clone')
+        clone_url = f'https://x-access-token:{token}@github.com/{repo_slug}.git'
+        log.info(f'Cloning {repo_slug} → {clone_dir}')
 
+        result = subprocess.run(
+            ['git', 'clone', '--depth=1', clone_url, clone_dir],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            log.error(f'git clone failed: {result.stderr}')
+            return None
+
+        # ── Copy translated site files into clone ──────────────────────────────
+        SKIP_EXTENSIONS = {'.zip', '.tar', '.gz', '.rar', '.7z', '.mp4', '.mp3', '.mov', '.avi'}
+        copied = 0
+        for root, dirs, files in os.walk(site_dir):
+            dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules')]
+            for fname in files:
+                if os.path.splitext(fname)[1].lower() in SKIP_EXTENSIONS:
+                    continue
+                src = os.path.join(root, fname)
+                rel = os.path.relpath(src, site_dir)
+                dst = os.path.join(clone_dir, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                copied += 1
+
+        log.info(f'Copied {copied} files into clone')
+
+        # ── Configure git identity ─────────────────────────────────────────────
+        subprocess.run(['git', 'config', 'user.email', 'seobot@noreply.github.com'],
+                       cwd=clone_dir, capture_output=True)
+        subprocess.run(['git', 'config', 'user.name', 'SEO Bot'],
+                       cwd=clone_dir, capture_output=True)
+
+        # ── Commit on new branch ───────────────────────────────────────────────
+        subprocess.run(['git', 'checkout', '-b', branch_name],
+                       cwd=clone_dir, capture_output=True)
+        subprocess.run(['git', 'add', '-A'],
+                       cwd=clone_dir, capture_output=True)
+
+        commit_msg = (
+            f'SEO fixes: translations ({", ".join(langs)}), schema, meta\n\n'
+            f'Auto-generated by SEO Bot\n'
+            f'Files changed: {copied}'
+        )
+        result = subprocess.run(
+            ['git', 'commit', '-m', commit_msg],
+            cwd=clone_dir, capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            log.info(f'git commit: {result.stdout.strip()} {result.stderr.strip()}')
+            if 'nothing to commit' in result.stdout + result.stderr:
+                log.info('No changes to commit')
+                return None
+
+        # ── Push ───────────────────────────────────────────────────────────────
+        log.info(f'Pushing branch {branch_name}...')
+        result = subprocess.run(
+            ['git', 'push', 'origin', branch_name],
+            cwd=clone_dir, capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            log.error(f'git push failed: {result.stderr}')
+            return None
+
+        log.info(f'Push OK — creating PR...')
+
+        # ── Create PR via API ──────────────────────────────────────────────────
         pr = gh_repo.create_pull(
             title='SEO improvements: translations, schema, meta',
             body=(
@@ -745,7 +755,7 @@ async def create_pull_request(
                 '- 📝 Исправлены title/description\n'
                 '- 🗂️ Добавлены Schema.org (BreadcrumbList, FAQPage)\n'
                 '- 🔗 Добавлен lang switcher\n\n'
-                f'Изменено файлов: {len(tree_elements)}\n\n'
+                f'Изменено файлов: {copied}\n\n'
                 '_Создано автоматически SEO Bot_'
             ),
             head=branch_name,

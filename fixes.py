@@ -577,7 +577,7 @@ def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str 
         raise ValueError('Translation API key not provided (WOWAI_API_KEY)')
 
     cmd = [
-        sys.executable, translate_script,
+        sys.executable, '-u', translate_script,
         '--key', api_key,
         '--langs', ','.join(langs),
         '--skip-existing',
