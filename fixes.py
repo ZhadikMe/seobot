@@ -654,9 +654,11 @@ def fix_lang_switcher(site_dir: str):
             with open(fpath, encoding='utf-8', errors='ignore') as f:
                 html = f.read()
 
-            # Skip if already injected
+            # Remove previously injected switcher so it gets regenerated with
+            # up-to-date language list (new translations may have been added)
             if 'lang-switcher' in html:
-                continue
+                html = re.sub(r'<style id="lang-switcher-style">.*?</style>\s*', '', html, flags=re.DOTALL)
+                html = re.sub(r'\s*<div id="lang-switcher">.*?</div>\s*<script id="lang-switcher-script">.*?</script>', '', html, flags=re.DOTALL)
 
             # Determine current page's language and slug
             rel = os.path.relpath(fpath, site_dir).replace(os.sep, '/')
