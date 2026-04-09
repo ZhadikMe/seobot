@@ -589,6 +589,7 @@ async def run_fixes(message: Message, state: FSMContext):
         ('🤖 Генерирую robots.txt...', 'fix_robots_txt'),
         ('🌍 Запускаю переводы...', 'fix_translations'),
         ('🌐 Добавляю hreflang на переведённые страницы...', 'fix_hreflang_translated'),
+        ('🔗 Добавляю внутренние ссылки...', 'fix_internal_links'),
         ('🔗 Исправляю lang switcher...', 'fix_lang_switcher'),
     ]
 

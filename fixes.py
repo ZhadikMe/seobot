@@ -35,6 +35,8 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
             fix_hreflang_translated(site_dir, langs, site_domain)
         elif step_key == 'fix_translations':
             fix_translations(site_dir, langs, wowai_key or groq_api_key, site_domain)
+        elif step_key == 'fix_internal_links':
+            fix_internal_links(site_dir)
         elif step_key == 'fix_lang_switcher':
             fix_lang_switcher(site_dir)
         return {'ok': True}
@@ -181,9 +183,20 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
     desc_m = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content="([^"]+)"', html, re.IGNORECASE)
     existing = desc_m.group(1).strip() if desc_m else ''
 
+    # Extract main keyword from title (remove site name suffix, drop stop words)
+    title_clean = re.split(r'\s+[|:–—]\s+', title)[0].strip()
+    stop = {'the','a','an','in','on','at','for','to','of','and','or','is','are',
+            'was','were','this','that','with','from','by','as','its','it','be'}
+    kw_words = [w for w in title_clean.lower().split() if w not in stop and len(w) > 2]
+    main_keyword = ' '.join(kw_words[:4]) if kw_words else title_clean
+
     prompt = (
-        f'Write a unique meta description for this webpage in 120-155 characters. '
-        f'No quotes, no markdown. Just the description text.\n\n'
+        f'Write a compelling meta description for this webpage.\n'
+        f'Requirements:\n'
+        f'- Length: 120-155 characters (count carefully)\n'
+        f'- Naturally include this keyword: "{main_keyword}"\n'
+        f'- End with a call-to-action (e.g. "Learn more", "Find out", "Discover", "Get started")\n'
+        f'- No quotes, no markdown, no bullet points — plain text only\n\n'
         f'Page title: {title}\n'
         f'Page content: {text}'
     )
@@ -580,6 +593,154 @@ def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str 
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr[-1000:] if result.stderr else 'Translation failed')
+
+
+def fix_internal_links(site_dir: str):
+    """
+    Auto-linker: insert 2-3 contextual internal links per page.
+
+    Algorithm (ported from HELP project's auto-linker.js):
+    1. Build keyword → URL map from EN page titles and H1 headings
+    2. For each EN page, find keyword matches in paragraph text
+    3. Wrap first occurrence (not inside an existing <a>) with a link
+    4. Limit: 3 insertions per page, no self-links, no duplicate targets
+    """
+    STOP_WORDS = {
+        'the','a','an','in','on','at','for','to','of','and','or','is','are',
+        'was','were','this','that','with','from','by','as','its','it','be',
+        'has','have','had','we','you','your','our','their','not','but','if',
+        'so','about','how','what','when','where','who','which','can','will',
+        'all','also','more','other','new','use','used','using','get','our',
+        'page','click','here','read','view','find','see','learn','check',
+    }
+    LANG_DIRS = {'ru', 'de', 'fr', 'es', 'it', 'pt'}
+    SKIP_DIRS = LANG_DIRS | {'scripts', 'images', 'css', '.git', 'node_modules'}
+
+    # ── Step 1: collect all EN HTML pages ──
+    html_files = []
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for fname in files:
+            if fname.endswith('.html'):
+                fpath = os.path.join(root, fname)
+                rel = fpath.replace(site_dir, '').replace(os.sep, '/').lstrip('/')
+                html_files.append((fpath, rel))
+
+    if len(html_files) < 2:
+        return  # Not enough pages to link between
+
+    # ── Step 2: build keyword → (url, anchor_text) map ──
+    page_map = {}  # keyword → (url_path, display_title)
+
+    for fpath, rel in html_files:
+        with open(fpath, encoding='utf-8', errors='ignore') as f:
+            html = f.read()
+
+        title_m = re.search(r'<title>([^<]+)</title>', html)
+        h1_m    = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.IGNORECASE | re.DOTALL)
+
+        title_raw = title_m.group(1).strip() if title_m else ''
+        h1_raw    = re.sub(r'<[^>]+>', '', h1_m.group(1)).strip() if h1_m else ''
+
+        # Strip site name suffix from title ("Page :: Site Name" → "Page")
+        title_clean = re.split(r'\s+[|:–—]\s+', title_raw)[0].strip()
+        label = h1_raw or title_clean
+
+        # Compute URL path
+        url_path = '/' + rel
+        if url_path.endswith('/index.html'):
+            url_path = url_path[:-len('index.html')]
+        elif url_path == '/index.html':
+            url_path = '/'
+
+        # Generate keyword phrases from title/H1
+        words = [w.lower() for w in re.findall(r'\b[a-zA-Z]{3,}\b', title_clean)
+                 if w.lower() not in STOP_WORDS]
+
+        # 2-word phrases (higher specificity, preferred)
+        for i in range(len(words) - 1):
+            kw = f'{words[i]} {words[i+1]}'
+            if len(kw) > 7 and kw not in page_map:
+                page_map[kw] = (url_path, label)
+
+        # Single meaningful words (length > 5, as fallback)
+        for w in words:
+            if len(w) > 5 and w not in page_map:
+                page_map[w] = (url_path, label)
+
+    # Sort by keyword length descending (longer phrases matched first)
+    sorted_kw = sorted(page_map.items(), key=lambda x: -len(x[0]))
+
+    # ── Step 3: insert links in each page ──
+    for fpath, rel in html_files:
+        with open(fpath, encoding='utf-8', errors='ignore') as f:
+            html = f.read()
+
+        url_path = '/' + rel
+        if url_path.endswith('/index.html'):
+            url_path = url_path[:-len('index.html')]
+        elif url_path == '/index.html':
+            url_path = '/'
+
+        inserted   = 0
+        used_urls  = {url_path}       # no self-links
+        used_kws   = set()
+        new_html   = html
+
+        for kw, (target_url, target_label) in sorted_kw:
+            if inserted >= 3:
+                break
+            if target_url in used_urls or kw in used_kws:
+                continue
+
+            # Match keyword inside <p> text but NOT inside an existing <a> tag
+            # Strategy: split HTML into link / non-link segments, only replace in non-link parts
+            def _insert_in_paragraphs(html_in, keyword, url, label):
+                """Replace first bare occurrence of keyword in a <p> with an <a> link."""
+                pattern = re.compile(
+                    r'(<p(?:\s[^>]*)?>)(.*?)(</p>)',
+                    re.IGNORECASE | re.DOTALL
+                )
+                replaced = [False]
+
+                def replace_in_p(m):
+                    if replaced[0]:
+                        return m.group(0)
+                    open_tag, inner, close_tag = m.group(1), m.group(2), m.group(3)
+
+                    # Only modify if keyword appears outside existing <a> tags
+                    # Split inner HTML into [non-link, link, non-link, link, ...]
+                    parts = re.split(r'(<a\b[^>]*>.*?</a>)', inner,
+                                     flags=re.IGNORECASE | re.DOTALL)
+                    new_parts = []
+                    done = False
+                    for part in parts:
+                        if not done and not part.startswith('<a'):
+                            new_part = re.sub(
+                                r'\b(' + re.escape(keyword) + r')\b',
+                                lambda mo, u=url, l=label: f'<a href="{u}" title="{l}">{mo.group(1)}</a>',
+                                part, count=1, flags=re.IGNORECASE
+                            )
+                            if new_part != part:
+                                done = True
+                                replaced[0] = True
+                            new_parts.append(new_part)
+                        else:
+                            new_parts.append(part)
+
+                    return open_tag + ''.join(new_parts) + close_tag
+
+                return pattern.sub(replace_in_p, html_in), replaced[0]
+
+            new_html, did_insert = _insert_in_paragraphs(new_html, kw, target_url, target_label)
+            if did_insert:
+                inserted += 1
+                used_urls.add(target_url)
+                used_kws.add(kw)
+
+        if inserted > 0 and new_html != html:
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(new_html)
 
 
 def fix_lang_switcher(site_dir: str):
