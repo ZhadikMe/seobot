@@ -47,7 +47,10 @@ def detect_and_normalize(repo_dir: str) -> tuple[str, str]:
         # If lang subdirectories already exist in repo root, the site was previously
         # processed and files were pushed flat to root (no site/ subfolder).
         # Re-extracting from archive would discard all merged fixes — use root instead.
-        LANGS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
+        LANGS = [
+            'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
+            'el', 'uk', 'ko', 'zh', 'ja', 'sk', 'fi', 'ar', 'hi',
+        ]
         lang_dirs_in_root = [d for d in LANGS if os.path.isdir(os.path.join(repo_dir, d))]
         if lang_dirs_in_root:
             root_html = glob.glob(os.path.join(repo_dir, '*.html'))
