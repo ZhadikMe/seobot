@@ -36,6 +36,15 @@ SUPPORTED_LANGS = {
     'ro': 'RO',
     'sv': 'SV',
     'tr': 'TR',
+    'el': 'EL',
+    'uk': 'UK',
+    'ko': 'KO',
+    'zh': 'ZH',
+    'ja': 'JA',
+    'sk': 'SK',
+    'fi': 'FI',
+    'ar': 'AR',
+    'hi': 'HI',
 }
 
 LANG_LOCALE = {
@@ -51,6 +60,15 @@ LANG_LOCALE = {
     'ro': 'ro_RO',
     'sv': 'sv_SE',
     'tr': 'tr_TR',
+    'el': 'el_GR',
+    'uk': 'uk_UA',
+    'ko': 'ko_KR',
+    'zh': 'zh_CN',
+    'ja': 'ja_JP',
+    'sk': 'sk_SK',
+    'fi': 'fi_FI',
+    'ar': 'ar_SA',
+    'hi': 'hi_IN',
 }
 
 LANG_NAME = {
@@ -66,10 +84,60 @@ LANG_NAME = {
     'ro': ('🇷🇴', 'Română'),
     'sv': ('🇸🇪', 'Svenska'),
     'tr': ('🇹🇷', 'Türkçe'),
+    'el': ('🇬🇷', 'Ελληνικά'),
+    'uk': ('🇺🇦', 'Українська'),
+    'ko': ('🇰🇷', '한국어'),
+    'zh': ('🇨🇳', '中文'),
+    'ja': ('🇯🇵', '日本語'),
+    'sk': ('🇸🇰', 'Slovenčina'),
+    'fi': ('🇫🇮', 'Suomi'),
+    'ar': ('🇸🇦', 'العربية'),
+    'hi': ('🇮🇳', 'हिन्दी'),
 }
 
 # Languages that use non-Latin scripts — fake detection via character ratio
 _NON_LATIN_LANGS = {'ru', 'uk', 'el', 'ko', 'zh', 'ja', 'ar', 'hi'}
+
+# Languages written right-to-left — patch_html removes dir="rtl" for LTR translations
+RTL_LANGS = {'ar'}
+
+# ── Source language detection ─────────────────────────────────────────────────
+
+def detect_source_lang(site_dir: str) -> str:
+    """
+    Detect the source language of the site from <html lang="..."> attribute.
+    Walks up to 5 HTML files, returns the most common lang code (default 'en').
+    """
+    from collections import Counter
+    counts: Counter = Counter()
+    checked = 0
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs
+                   if d not in list(SUPPORTED_LANGS.keys()) + ['scripts', '.git', 'node_modules',
+                                                                  'web.archive.org', 'web-static.archive.org']]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, encoding='utf-8', errors='ignore') as f:
+                    snippet = f.read(2000)
+                m = re.search(r'<html[^>]+\blang=["\']([a-z]{2,5})["\']', snippet, re.IGNORECASE)
+                if m:
+                    lang = m.group(1).lower().split('-')[0]  # "ar-SA" → "ar"
+                    counts[lang] += 1
+            except Exception:
+                pass
+            checked += 1
+            if checked >= 10:
+                break
+        if checked >= 10:
+            break
+    if not counts:
+        return 'en'
+    top = counts.most_common(1)[0][0]
+    return top if top in SUPPORTED_LANGS or top == 'en' else 'en'
+
 
 # ── Translation API ───────────────────────────────────────────────────────────
 
@@ -257,6 +325,40 @@ def extract_translatable(html: str) -> list[str]:
             for m in re.finditer(rf'<{tag}[^>]*>(.*?)</{tag}>', content_html, re.IGNORECASE | re.DOTALL):
                 _extract_text_nodes(m.group(1), segments, min_len=3)
 
+    # ── figcaption ──
+    if content_html:
+        for m in re.finditer(r'<figcaption[^>]*>(.*?)</figcaption>', content_html, re.IGNORECASE | re.DOTALL):
+            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            if text and len(text) >= 5 and not _should_skip_segment(text):
+                segments.append(text)
+
+    # ── input placeholder ──
+    for m in re.finditer(r'<input[^>]+\bplaceholder="([^"]+)"', html, re.IGNORECASE):
+        text = m.group(1).strip()
+        if len(text) >= 3 and not _should_skip_segment(text):
+            segments.append(text)
+
+    # ── card-title / card-text / card-body (common Bootstrap patterns) ──
+    if content_html:
+        for cls in ('card-title', 'card-text', 'card-body', 'card-header', 'card-subtitle'):
+            for m in re.finditer(
+                rf'<[a-z][^>]+\bclass="[^"]*{cls}[^"]*"[^>]*>(.*?)</[a-z]+>',
+                content_html, re.IGNORECASE | re.DOTALL
+            ):
+                text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+                if len(text) >= 5 and not text.startswith('http') and not _should_skip_segment(text):
+                    segments.append(text)
+
+    # ── standalone <span> with meaningful text (not nested deeply) ──
+    if content_html:
+        for m in re.finditer(r'<span[^>]*>([^<]{5,100})</span>', content_html, re.IGNORECASE):
+            text = m.group(1).strip()
+            if (len(text) >= 5
+                    and not text.startswith('http')
+                    and not re.match(r'^[\W\d]+$', text)
+                    and not _should_skip_segment(text)):
+                segments.append(text)
+
     # ── Navigation / header / footer — short UI strings ──
     # Also handles div-based navs: <div id/class containing nav/menu/navbar>
     nav_sections = []
@@ -378,9 +480,10 @@ def patch_html(html: str, translations: dict, lang: str, original_rel_path: str)
         )
 
     # Fix absolute internal links: /path → /{lang}/path
+    _all_lang_codes = '|'.join(re.escape(l) for l in SUPPORTED_LANGS)
     def _fix_a_href(m):
         pre, href, post = m.group(1), m.group(2), m.group(3)
-        if re.match(r'^/(ru|de|fr|es|it|pt)/', href):
+        if re.match(rf'^/({_all_lang_codes})/', href):
             return m.group(0)
         return f'{pre}href="/{lang}{href}"{post}'
 
@@ -389,6 +492,13 @@ def patch_html(html: str, translations: dict, lang: str, original_rel_path: str)
         _fix_a_href,
         patched
     )
+
+    # For Arabic/RTL target language: set dir="rtl" on html tag
+    # For non-RTL target language translating an RTL source: remove dir="rtl"
+    if lang in RTL_LANGS:
+        patched = re.sub(r'(<html[^>]*)(?:\s+dir=["\'][^"\']*["\'])?', r'\1 dir="rtl"', patched, count=1)
+    else:
+        patched = re.sub(r'\s+dir=["\']rtl["\']', '', patched)
 
     # Fix relative resource paths for flat-root HTML moved into /lang/ subdir
     if _is_flat_root(original_rel_path):
@@ -430,8 +540,9 @@ def patch_html(html: str, translations: dict, lang: str, original_rel_path: str)
     return patched
 
 
-def add_hreflang(html: str, original_rel_path: str, available_langs: list) -> str:
-    """Add hreflang alternate links for all confirmed translations + EN."""
+def add_hreflang(html: str, original_rel_path: str, available_langs: list,
+                  source_lang: str = 'en') -> str:
+    """Add hreflang alternate links for all confirmed translations + source lang."""
     page_path = original_rel_path.replace('/index.html', '/').replace('\\', '/')
     if not page_path.startswith('/'):
         page_path = '/' + page_path
@@ -439,8 +550,11 @@ def add_hreflang(html: str, original_rel_path: str, available_langs: list) -> st
     # Remove existing hreflang links
     html = re.sub(r'\n\s*<link\s+rel=["\']alternate["\']\s+hreflang=[^>]+>', '', html)
 
-    lines = [f'  <link rel="alternate" hreflang="en" href="{BASE_URL}{page_path}">']
+    # Source lang is always the root URL
+    lines = [f'  <link rel="alternate" hreflang="{source_lang}" href="{BASE_URL}{page_path}">']
     for lang in sorted(available_langs):
+        if lang == source_lang:
+            continue  # already added above
         lines.append(f'  <link rel="alternate" hreflang="{lang}" href="{BASE_URL}/{lang}{page_path}">')
     lines.append(f'  <link rel="alternate" hreflang="x-default" href="{BASE_URL}{page_path}">')
 
@@ -449,11 +563,98 @@ def add_hreflang(html: str, original_rel_path: str, available_langs: list) -> st
     return html
 
 
+# ── Nav/footer translation cache ─────────────────────────────────────────────
+
+def _extract_nav_segments(html: str) -> list[str]:
+    """
+    Extract ONLY nav/header/footer UI strings (short, repeated across pages).
+    Used for pre-building a session-level cache to avoid re-translating identical
+    nav strings on every page.
+    """
+    segments = []
+    sections = []
+
+    for tag in ('nav', 'header', 'footer'):
+        m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', html, re.DOTALL | re.IGNORECASE)
+        if m:
+            sections.append(m.group(1))
+    for m in re.finditer(
+        r'<div[^>]+(?:id|class)=["\'][^"\']*(?:nav|menu|navbar|header|footer)[^"\']*["\'][^>]*>(.*?)</div>',
+        html, re.DOTALL | re.IGNORECASE
+    ):
+        sections.append(m.group(1))
+
+    for section_html in sections:
+        for m in re.finditer(r'<a[^>]*>(.*?)</a>', section_html, re.IGNORECASE | re.DOTALL):
+            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
+            if 2 <= len(text) <= 60 and not text.startswith('http') and not _should_skip_segment(text):
+                segments.append(text)
+        for tag in ('button', 'span', 'li'):
+            for m in re.finditer(rf'<{tag}[^>]*>([^<]{{2,80}})</{tag}>', section_html, re.IGNORECASE):
+                text = m.group(1).strip()
+                if 2 <= len(text) <= 80 and not _should_skip_segment(text):
+                    segments.append(text)
+
+    seen = set()
+    return [s for s in segments if not (s in seen or seen.add(s))]
+
+
+def build_nav_cache(api_key: str, site_dir: str, target_langs: list,
+                    source_lang: str = 'en') -> dict:
+    """
+    Pre-translate all nav/header/footer strings from every page — once per language.
+    Returns {lang: {original: translated}}.
+
+    Saves ~30% API calls by avoiding re-translation of identical UI strings
+    (nav links, buttons) that appear on every page.
+    """
+    all_nav_segs: set[str] = set()
+
+    skip_dirs = set(SUPPORTED_LANGS.keys()) | {'scripts', '.git', 'node_modules',
+                                                 'web.archive.org', 'web-static.archive.org'}
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, encoding='utf-8', errors='ignore') as f:
+                    html = f.read()
+                for seg in _extract_nav_segments(html):
+                    all_nav_segs.add(seg)
+            except Exception:
+                pass
+
+    if not all_nav_segs:
+        return {}
+
+    nav_list = sorted(all_nav_segs)
+    print(f'  [nav-cache] {len(nav_list)} unique nav/footer strings → pre-translating...')
+
+    cache: dict[str, dict[str, str]] = {}
+    for lang in target_langs:
+        raw = translate_batch(api_key, nav_list, lang)
+        filtered = {o: t for o, t in raw.items() if not _is_fake_translation(o, t, lang)}
+        cache[lang] = filtered
+        print(f'  [nav-cache] {lang}: {len(filtered)}/{len(nav_list)} strings cached')
+
+    return cache
+
+
 # ── Per-page translation ──────────────────────────────────────────────────────
 
 def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: list,
-                   dry_run=False, skip_existing=False) -> list:
-    """Translate one HTML page to all target languages. Returns list of confirmed langs."""
+                   dry_run=False, skip_existing=False,
+                   nav_cache: dict | None = None,
+                   source_lang: str = 'en') -> list:
+    """
+    Translate one HTML page to all target languages. Returns list of confirmed langs.
+
+    nav_cache: pre-built {lang: {original: translated}} for nav/footer strings.
+               Avoids re-translating repeated UI strings on every page.
+    source_lang: source language of the site (default 'en').
+    """
     with open(src_path, encoding='utf-8') as f:
         html = f.read()
 
@@ -471,6 +672,9 @@ def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: lis
     is_flat   = _is_flat_root(rel_path)
 
     for lang in target_langs:
+        if lang == source_lang:
+            continue  # never translate into the source language
+
         if is_flat and src_fname != 'index.html':
             out_dir  = os.path.join(SITE, lang)
             out_path = os.path.join(out_dir, src_fname)
@@ -486,23 +690,34 @@ def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: lis
 
         print(f'    → {lang}...', end=' ', flush=True)
 
-        raw_translations = translate_batch(api_key, segments, lang)
+        # Start with nav/footer cache for this language (avoids repeated API calls)
+        lang_cache = nav_cache.get(lang, {}) if nav_cache else {}
 
-        if not raw_translations:
+        # Only send segments not already in cache to the API
+        uncached = [s for s in segments if s not in lang_cache]
+        if uncached:
+            raw_translations = translate_batch(api_key, uncached, lang)
+        else:
+            raw_translations = {}
+
+        if not raw_translations and not lang_cache:
             print('FAILED')
             continue
 
-        # Filter fake/failed translations using per-language heuristics
+        # Merge cache + fresh translations, filter fakes
+        all_raw = {**lang_cache, **raw_translations}
         translations = {
-            o: t for o, t in raw_translations.items()
+            o: t for o, t in all_raw.items()
             if not _is_fake_translation(o, t, lang)
         }
 
-        valid = len(translations)
-        total = len(segments)
-        fake  = len(raw_translations) - valid
-        fake_note = f', {fake} fake' if fake else ''
-        print(f'OK ({valid}/{total} translated{fake_note})')
+        valid     = len(translations)
+        total     = len(segments)
+        from_cache = sum(1 for s in segments if s in lang_cache)
+        fake      = len(all_raw) - valid
+        cache_note = f', {from_cache} cached' if from_cache else ''
+        fake_note  = f', {fake} fake' if fake else ''
+        print(f'OK ({valid}/{total} translated{cache_note}{fake_note})')
 
         if dry_run:
             confirmed_langs.append(lang)
@@ -516,17 +731,19 @@ def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: lis
 
         confirmed_langs.append(lang)
 
-    # Update original EN page with hreflang — merge with existing langs to avoid
-    # losing translations from previous runs (e.g. re-run with different languages)
+    # Update source page with hreflang — merge with existing langs to preserve
+    # translations from previous runs (e.g. re-run with different languages)
     if confirmed_langs and not dry_run:
         existing_langs = re.findall(
             r'<link[^>]*hreflang=["\']([a-z]{2})["\'][^>]*>', html, re.IGNORECASE
         )
-        all_langs = sorted(set(existing_langs + confirmed_langs) - {'en', 'x-default', 'x'})
-        updated_html = add_hreflang(html, rel_path, all_langs)
+        all_langs = sorted(
+            set(existing_langs + confirmed_langs) - {source_lang, 'x-default', 'x'}
+        )
+        updated_html = add_hreflang(html, rel_path, all_langs, source_lang=source_lang)
         with open(src_path, 'w', encoding='utf-8') as f:
             f.write(updated_html)
-        print(f'    hreflang → EN page: {all_langs}')
+        print(f'    hreflang → {source_lang} page: {all_langs}')
 
     return confirmed_langs
 
@@ -640,16 +857,23 @@ def main():
         print(f'No valid languages. Supported: {", ".join(SUPPORTED_LANGS)}')
         sys.exit(1)
 
-    print(f'wowaitranslate ready. Target languages: {", ".join(target_langs)}')
+    # Detect source language from HTML
+    source_lang = detect_source_lang(SITE)
+    print(f'wowaitranslate ready. Source: {source_lang}. Target: {", ".join(target_langs)}')
     if args.dry_run:
         print('DRY RUN — no files will be written')
+
+    # Pre-build nav/footer translation cache (saves ~30% API calls)
+    nav_cache = build_nav_cache(api_key, SITE, target_langs, source_lang)
 
     translated_pages = {}
 
     if args.page:
         src = os.path.join(SITE, args.page.replace('/', os.sep))
         rel = '/' + args.page.replace('\\', '/')
-        langs = translate_page(api_key, src, rel, target_langs, args.dry_run, args.skip_existing)
+        langs = translate_page(api_key, src, rel, target_langs, args.dry_run,
+                               args.skip_existing, nav_cache=nav_cache,
+                               source_lang=source_lang)
         if langs:
             translated_pages[rel] = langs
     else:
@@ -663,7 +887,8 @@ def main():
                 fpath = os.path.join(root, fname)
                 rel   = fpath.replace(SITE, '').replace(os.sep, '/')
                 langs = translate_page(api_key, fpath, rel, target_langs,
-                                       args.dry_run, args.skip_existing)
+                                       args.dry_run, args.skip_existing,
+                                       nav_cache=nav_cache, source_lang=source_lang)
                 if langs:
                     translated_pages[rel] = langs
 

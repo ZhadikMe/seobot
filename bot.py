@@ -35,8 +35,30 @@ WOWAI_KEY      = os.getenv('WOWAI_API_KEY', 'sk_trans_o5Un1stZ7eEG5uXovdDK_XlwzG
 bot = Bot(token=TELEGRAM_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
 
-# Global processing lock — only one site at a time
-_processing_user_id: int | None = None
+# ── Queue system — max 1 active + MAX_QUEUE waiting ──────────────────────────
+from collections import deque
+
+MAX_QUEUE = 2  # max 2 waiting jobs (3 total including active)
+
+_active_job: dict | None = None           # currently running job
+_job_queue: deque[dict] = deque()         # pending jobs
+
+def _queue_size() -> int:
+    return len(_job_queue) + (1 if _active_job else 0)
+
+def _user_in_system(user_id: int) -> bool:
+    if _active_job and _active_job['user_id'] == user_id:
+        return True
+    return any(j['user_id'] == user_id for j in _job_queue)
+
+def _queue_position(user_id: int) -> int:
+    """1-based position in queue (1 = next after active). 0 = is active."""
+    if _active_job and _active_job['user_id'] == user_id:
+        return 0
+    for i, j in enumerate(_job_queue):
+        if j['user_id'] == user_id:
+            return i + 1
+    return -1
 
 
 # ── FSM States ────────────────────────────────────────────────────────────────
@@ -53,28 +75,60 @@ class SEOFlow(StatesGroup):
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
 
-def langs_keyboard(selected: set) -> InlineKeyboardMarkup:
-    options = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
-    labels  = {
-        'ru': '🇷🇺 RU', 'de': '🇩🇪 DE', 'fr': '🇫🇷 FR', 'es': '🇪🇸 ES',
-        'it': '🇮🇹 IT', 'pt': '🇵🇹 PT', 'pl': '🇵🇱 PL', 'nl': '🇳🇱 NL',
-        'cs': '🇨🇿 CS', 'ro': '🇷🇴 RO', 'sv': '🇸🇪 SV', 'tr': '🇹🇷 TR',
-    }
+ALL_TARGET_LANGS = [
+    'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
+    'el', 'uk', 'ko', 'zh', 'ja', 'sk', 'fi', 'ar', 'hi',
+]
+
+LANG_LABELS = {
+    'ru': '🇷🇺 RU', 'de': '🇩🇪 DE', 'fr': '🇫🇷 FR', 'es': '🇪🇸 ES',
+    'it': '🇮🇹 IT', 'pt': '🇵🇹 PT', 'pl': '🇵🇱 PL', 'nl': '🇳🇱 NL',
+    'cs': '🇨🇿 CS', 'ro': '🇷🇴 RO', 'sv': '🇸🇪 SV', 'tr': '🇹🇷 TR',
+    'el': '🇬🇷 EL', 'uk': '🇺🇦 UK', 'ko': '🇰🇷 KO', 'zh': '🇨🇳 ZH',
+    'ja': '🇯🇵 JA', 'sk': '🇸🇰 SK', 'fi': '🇫🇮 FI', 'ar': '🇸🇦 AR',
+    'hi': '🇮🇳 HI',
+}
+
+
+def langs_choice_keyboard() -> InlineKeyboardMarkup:
+    """First-step language choice: all at once or pick manually."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=f'🌍 Все языки ({len(ALL_TARGET_LANGS)})', callback_data='langchoice:all'),
+            InlineKeyboardButton(text='✏️ Выбрать вручную', callback_data='langchoice:custom'),
+        ]
+    ])
+
+
+def langs_keyboard(selected: set, exclude: set | None = None) -> InlineKeyboardMarkup:
+    """Language selection keyboard. exclude: skip languages (e.g. source_lang)."""
+    exclude = exclude or set()
+    options = [l for l in ALL_TARGET_LANGS if l not in exclude]
     buttons = []
     for lang in options:
-        label = ('✅ ' if lang in selected else '') + labels[lang]
+        label = ('✅ ' if lang in selected else '') + LANG_LABELS[lang]
         buttons.append(InlineKeyboardButton(text=label, callback_data=f'lang:{lang}'))
 
-    rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
-    rows.append([InlineKeyboardButton(text='▶️ Запустить анализ', callback_data='lang:start')])
+    rows = [buttons[i:i+4] for i in range(0, len(buttons), 4)]
+    rows.append([
+        InlineKeyboardButton(text='✅ Выбрать все', callback_data='lang:all'),
+        InlineKeyboardButton(text='☑️ Снять все', callback_data='lang:none'),
+    ])
+    rows.append([InlineKeyboardButton(text='▶️ Запустить', callback_data='lang:start')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def mode_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text='🔍 Только аудит', callback_data='mode:audit'),
-        InlineKeyboardButton(text='🔧 Аудит + исправления + PR', callback_data='mode:full'),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text='🔍 Только аудит', callback_data='mode:audit'),
+            InlineKeyboardButton(text='🔧 Полный (SEO + перевод + PR)', callback_data='mode:full'),
+        ],
+        [
+            InlineKeyboardButton(text='🛠️ SEO без перевода + PR', callback_data='mode:seo_only'),
+            InlineKeyboardButton(text='🌍 Только перевод + PR', callback_data='mode:translate_only'),
+        ],
+    ])
 
 
 def confirm_keyboard() -> InlineKeyboardMarkup:
@@ -140,7 +194,7 @@ async def cmd_info(message: Message):
 @dp.message(Command('cancel'))
 @dp.message(F.text == '← Назад')
 async def cmd_cancel(message: Message, state: FSMContext):
-    global _processing_user_id
+    global _active_job, _job_queue
     current_state = await state.get_state()
     data = await state.get_data()
 
@@ -149,8 +203,8 @@ async def cmd_cancel(message: Message, state: FSMContext):
         tmp = data.get('tmp_dir')
         if tmp and os.path.exists(tmp):
             shutil.rmtree(tmp, ignore_errors=True)
-        if _processing_user_id == message.from_user.id:
-            _processing_user_id = None
+        if _active_job and _active_job['user_id'] == message.from_user.id:
+            _active_job = None
         await state.clear()
         await message.answer('❌ Обработка отменена.', reply_markup=main_keyboard())
         return
@@ -179,9 +233,9 @@ async def cmd_cancel(message: Message, state: FSMContext):
         await state.set_state(SEOFlow.waiting_domain)
 
     elif current_state == SEOFlow.waiting_langs:
-        # Back to: token input (full) or domain (audit)
+        # Back to: token input (full/translate_only) or domain (audit)
         mode = data.get('mode', 'full')
-        if mode == 'full':
+        if mode in ('full', 'translate_only'):
             await message.answer(
                 '🔑 Введи GitHub токен (начинается с `ghp_`):',
                 parse_mode='Markdown', reply_markup=token_keyboard()
@@ -195,20 +249,26 @@ async def cmd_cancel(message: Message, state: FSMContext):
             await state.set_state(SEOFlow.waiting_domain)
 
     elif current_state == SEOFlow.waiting_confirm:
-        # Back to: language selection
-        await message.answer(
-            '🌍 Выбери языки для перевода:',
-            reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
-        )
-        await state.set_state(SEOFlow.waiting_langs)
+        mode = data.get('mode', 'full')
+        if mode == 'seo_only':
+            # seo_only has no langs step — go back to domain
+            await message.answer(
+                '🌐 *Укажи домен сайта* (или Пропустить):',
+                parse_mode='Markdown', reply_markup=domain_keyboard()
+            )
+            await state.set_state(SEOFlow.waiting_domain)
+        else:
+            await message.answer(
+                '🌍 Выбери языки для перевода:',
+                reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
+            )
+            await state.set_state(SEOFlow.waiting_langs)
 
     else:
         # No active flow — clean up and restart
         tmp = data.get('tmp_dir')
         if tmp and os.path.exists(tmp):
             shutil.rmtree(tmp, ignore_errors=True)
-        if _processing_user_id == message.from_user.id:
-            _processing_user_id = None
         await state.clear()
         await message.answer(
             '📎 Отправь ссылку на GitHub репозиторий:\n`https://github.com/user/repo`',
@@ -241,12 +301,12 @@ def main_keyboard() -> ReplyKeyboardMarkup:
 @dp.message(F.text.regexp(r'https?://github\.com/'))
 async def got_repo(message: Message, state: FSMContext):
     """Accept GitHub URL in any state — auto-reset if needed."""
-    global _processing_user_id
+    uid = message.from_user.id
 
-    # Check if another user is currently processing
-    if _processing_user_id is not None and _processing_user_id != message.from_user.id:
+    # If another user has filled the queue — reject
+    if not _user_in_system(uid) and _queue_size() >= MAX_QUEUE + 1:
         await message.answer(
-            '⏳ *Бот сейчас занят* — обрабатывается другой сайт.\n\n'
+            f'⏳ *Очередь заполнена* ({MAX_QUEUE + 1} задания).\n\n'
             'Попробуй через несколько минут.',
             parse_mode='Markdown'
         )
@@ -295,6 +355,17 @@ async def chose_mode(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+_TOKEN_PROMPT = (
+    '🔑 *Нужен GitHub токен* — для скачивания репо и создания PR.\n\n'
+    'Как получить:\n'
+    '1. Открой [github.com/settings/tokens](https://github.com/settings/tokens)\n'
+    '2. Нажми *Generate new token* → *Generate new token (classic)*\n'
+    '3. Дай любое название, например `seobot`\n'
+    '4. Поставь галочку на `repo` (первый пункт в списке)\n'
+    '5. Нажми *Generate token* → скопируй токен (начинается с `ghp_`)\n\n'
+    '_Сообщение с токеном будет удалено сразу после получения._'
+)
+
 async def _after_domain(message_or_callback, state: FSMContext):
     """Continue flow after domain step."""
     data = await state.get_data()
@@ -304,20 +375,20 @@ async def _after_domain(message_or_callback, state: FSMContext):
         await message_or_callback.answer(
             '🔍 Режим: только аудит.\n\n'
             '🌍 Выбери языки (для отчёта):',
-            reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
+            reply_markup=langs_choice_keyboard()
         )
         await state.set_state(SEOFlow.waiting_langs)
-    else:
+    elif mode == 'seo_only':
         await message_or_callback.answer(
-            '🔧 Режим: аудит + исправления + PR.\n\n'
-            '🔑 *Нужен GitHub токен* — для скачивания репо и создания PR.\n\n'
-            'Как получить:\n'
-            '1. Открой [github.com/settings/tokens](https://github.com/settings/tokens)\n'
-            '2. Нажми *Generate new token* → *Generate new token (classic)*\n'
-            '3. Дай любое название, например `seobot`\n'
-            '4. Поставь галочку на `repo` (первый пункт в списке)\n'
-            '5. Нажми *Generate token* → скопируй токен (начинается с `ghp_`)\n\n'
-            '_Сообщение с токеном будет удалено сразу после получения._',
+            '🛠️ Режим: SEO без перевода + PR.\n\n' + _TOKEN_PROMPT,
+            parse_mode='Markdown',
+            reply_markup=token_keyboard()
+        )
+        await state.set_state(SEOFlow.waiting_github_token)
+    else:
+        mode_label = '🌍 Только перевод' if mode == 'translate_only' else '🔧 Аудит + исправления'
+        await message_or_callback.answer(
+            f'{mode_label} + PR.\n\n' + _TOKEN_PROMPT,
             parse_mode='Markdown',
             reply_markup=token_keyboard()
         )
@@ -360,23 +431,48 @@ async def got_github_token(message: Message, state: FSMContext):
 
     await state.update_data(user_github_token=token)
     data = await state.get_data()
-    await message.answer(
-        '✅ Токен принят.\n\n🌍 Выбери языки для перевода:',
-        reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
-    )
-    await state.set_state(SEOFlow.waiting_langs)
+    mode = data.get('mode', 'full')
+
+    if mode == 'seo_only':
+        # No language selection needed — run audit + confirm directly
+        await state.update_data(selected_langs=set())
+        await run_audit(message, state)
+    else:
+        await message.answer(
+            '✅ Токен принят.\n\n🌍 Выбери языки для перевода:',
+            reply_markup=langs_choice_keyboard()
+        )
+        await state.set_state(SEOFlow.waiting_langs)
 
 
 @dp.callback_query(SEOFlow.waiting_github_token, F.data == 'token:skip')
 async def skip_github_token(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
-    data = await state.get_data()
     await callback.message.answer(
         '⏭️ Без токена — только аудит, PR не создастся.\n\n'
         '🌍 Выбери языки:',
-        reply_markup=langs_keyboard(data.get('selected_langs', {'ru', 'de', 'fr', 'es'}))
+        reply_markup=langs_choice_keyboard()
     )
     await state.set_state(SEOFlow.waiting_langs)
+    await callback.answer()
+
+
+@dp.callback_query(SEOFlow.waiting_langs, F.data.startswith('langchoice:'))
+async def chose_lang_mode(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(':')[1]
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    if choice == 'all':
+        await state.update_data(selected_langs=set(ALL_TARGET_LANGS))
+        await run_audit(callback.message, state)
+    else:
+        # Show manual selection grid
+        data = await state.get_data()
+        selected = data.get('selected_langs', {'ru', 'de', 'fr', 'es'})
+        await callback.message.answer(
+            '✏️ Выбери языки (нажми ▶️ Запустить когда готово):',
+            reply_markup=langs_keyboard(selected)
+        )
     await callback.answer()
 
 
@@ -394,7 +490,11 @@ async def toggle_lang(callback: CallbackQuery, state: FSMContext):
         await run_audit(callback.message, state)
         return
 
-    if lang in selected:
+    if lang == 'all':
+        selected = set(ALL_TARGET_LANGS)
+    elif lang == 'none':
+        selected = set()
+    elif lang in selected:
         selected.discard(lang)
     else:
         selected.add(lang)
@@ -467,8 +567,7 @@ async def download_repo_zip(repo_slug: str, dest_dir: str, token: str | None = N
 
 async def run_audit(message: Message, state: FSMContext):
     """Clone repo, detect structure, normalize, run SEO audit."""
-    global _processing_user_id
-    _processing_user_id = message.from_user.id
+    global _active_job
 
     data = await state.get_data()
     repo_url   = data['repo_url']
@@ -490,7 +589,6 @@ async def run_audit(message: Message, state: FSMContext):
             chat_id=message.chat.id, message_id=status_msg.message_id,
             parse_mode='Markdown')
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        _processing_user_id = None
         await state.clear()
         return
 
@@ -498,7 +596,7 @@ async def run_audit(message: Message, state: FSMContext):
     # - First run (no lang dirs at root): delete site/ → re-extract from archive
     # - Re-run (lang dirs exist at root from merged PR): preserve site/, copy lang
     #   dirs into it so skip_existing in translate.py finds existing translations
-    _LANG_LIST = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
+    _LANG_LIST = ALL_TARGET_LANGS
     archive_in_repo = os.path.join(tmp_dir, 'web.archive.org')
     if os.path.isdir(archive_in_repo):
         stale_site = os.path.join(tmp_dir, 'site')
@@ -528,7 +626,6 @@ async def run_audit(message: Message, state: FSMContext):
     except Exception as e:
         await bot.edit_message_text(text=f'❌ {e}', chat_id=message.chat.id, message_id=status_msg.message_id)
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        _processing_user_id = None
         await state.clear()
         return
 
@@ -552,9 +649,29 @@ async def run_audit(message: Message, state: FSMContext):
     if mode == 'audit':
         # Audit-only mode — clean up and finish
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        _processing_user_id = None
+        if _active_job and _active_job.get('user_id') == state.key.user_id:
+            _active_job = None
         await state.clear()
         await message.answer('✅ Аудит завершён. Отправь новую ссылку для следующего сайта.')
+    elif mode == 'seo_only':
+        time_est = estimate_processing_time(site_dir, [])
+        await message.answer(
+            f'⏱ *Примерное время:* `{time_est}`\n\n'
+            '🛠️ Запустить SEO-исправления без перевода и создать Pull Request?',
+            parse_mode='Markdown',
+            reply_markup=confirm_keyboard()
+        )
+        await state.set_state(SEOFlow.waiting_confirm)
+    elif mode == 'translate_only':
+        time_est = estimate_processing_time(site_dir, langs)
+        await message.answer(
+            f'⏱ *Примерное время:* `{time_est}`\n\n'
+            '🌍 Запустить перевод + создать Pull Request?\n'
+            '_SEO-исправления будут пропущены._',
+            parse_mode='Markdown',
+            reply_markup=confirm_keyboard()
+        )
+        await state.set_state(SEOFlow.waiting_confirm)
     else:
         time_est = estimate_processing_time(site_dir, langs)
         await message.answer(
@@ -568,6 +685,8 @@ async def run_audit(message: Message, state: FSMContext):
 
 @dp.callback_query(SEOFlow.waiting_confirm, F.data.startswith('confirm:'))
 async def handle_confirm(callback: CallbackQuery, state: FSMContext):
+    global _active_job, _job_queue
+
     answer = callback.data.split(':')[1]
     await callback.message.edit_reply_markup(reply_markup=None)
 
@@ -579,24 +698,74 @@ async def handle_confirm(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(SEOFlow.processing)
-    await run_fixes(callback.message, state)
+
+    # Check if we can start immediately or need to queue
+    if _active_job is None:
+        await run_fixes(callback.message, state)
+    else:
+        data = await state.get_data()
+        pos = len(_job_queue) + 1
+        _job_queue.append({
+            'user_id': callback.from_user.id,
+            'chat_id': callback.message.chat.id,
+            'data': data,
+            'mode': data.get('mode', 'full'),
+        })
+        await state.clear()
+        await callback.message.answer(
+            f'⏳ *Твой сайт поставлен в очередь* (позиция {pos}).\n\n'
+            f'Бот сейчас обрабатывает другой сайт. Уведомлю когда придёт твоя очередь.',
+            parse_mode='Markdown'
+        )
 
 
 
 async def run_fixes(message: Message, state: FSMContext):
     """Run all SEO fixes and create PR."""
-    global _processing_user_id
-    data = await state.get_data()
-    tmp_dir   = data['tmp_dir']
-    site_dir  = data.get('site_dir', tmp_dir)
-    repo_slug = data['repo_slug']
-    langs     = sorted(data['selected_langs'])
+    global _active_job, _job_queue
 
-    status = await message.answer('⚙️ Начинаю исправления...')
+    data = await state.get_data()
+    tmp_dir        = data['tmp_dir']
+    site_dir       = data.get('site_dir', tmp_dir)
+    repo_slug      = data['repo_slug']
+    langs          = sorted(data['selected_langs'])
+    mode           = data.get('mode', 'full')
+    site_domain    = data.get('site_domain')
+    translate_only = (mode == 'translate_only')
+    seo_only = (mode == 'seo_only')
+
+    # Register as active job (state.key.user_id is safe even when message is bot's own)
+    _active_job = {'user_id': state.key.user_id, 'tmp_dir': tmp_dir}
+
+    # Detect source language from the site
+    from fixes import run_all_fixes
+    from translate import detect_source_lang
+    import functools
+    source_lang = await asyncio.get_event_loop().run_in_executor(
+        None, detect_source_lang, site_dir
+    )
+    log.info(f'Source language detected: {source_lang}')
+
+    # Audit BEFORE fixes (to show before/after comparison)
+    from audit import run_audit_on_dir
+    audit_before = run_audit_on_dir(site_dir)
+
+    if translate_only:
+        start_label = 'перевод'
+    elif seo_only:
+        start_label = 'SEO-исправления'
+    else:
+        start_label = 'исправления'
+
+    status = await message.answer(
+        f'⚙️ Начинаю {start_label}...'
+        + (f'\n🌐 Исходный язык сайта: `{source_lang}`' if source_lang != 'en' else ''),
+        parse_mode='Markdown'
+    )
 
     loop = asyncio.get_event_loop()
 
-    steps = [
+    SEO_STEPS = [
         ('🧹 Очищаю archive.org скрипты...', 'fix_archive_scripts'),
         ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
         ('📅 Обновляю год в заголовках...', 'fix_title_refresh'),
@@ -605,15 +774,25 @@ async def run_fixes(message: Message, state: FSMContext):
         ('🖼️ Добавляю OG images...', 'fix_og_image'),
         ('🚫 Добавляю nofollow на внешние ссылки...', 'fix_nofollow'),
         ('🤖 Генерирую robots.txt...', 'fix_robots_txt'),
+    ]
+    TRANSLATE_STEPS = [
         ('🌍 Запускаю переводы...', 'fix_translations'),
         ('🌐 Добавляю hreflang на переведённые страницы...', 'fix_hreflang_translated'),
         ('🔗 Добавляю внутренние ссылки...', 'fix_internal_links'),
-        ('🔗 Исправляю lang switcher...', 'fix_lang_switcher'),
+        ('🔗 Обновляю lang switcher...', 'fix_lang_switcher'),
     ]
 
-    from fixes import run_all_fixes
-    import functools
-    site_domain = data.get('site_domain')
+    if translate_only:
+        steps = [
+            ('🌍 Запускаю переводы...', 'fix_translations'),
+            ('🌐 Добавляю hreflang на переведённые страницы...', 'fix_hreflang_translated'),
+            ('🔗 Обновляю lang switcher...', 'fix_lang_switcher'),
+        ]
+    elif seo_only:
+        steps = SEO_STEPS
+    else:
+        steps = SEO_STEPS + TRANSLATE_STEPS
+
     for step_text, step_key in steps:
         await bot.edit_message_text(text=step_text, chat_id=message.chat.id, message_id=status.message_id)
         try:
@@ -633,7 +812,7 @@ async def run_fixes(message: Message, state: FSMContext):
             result = await loop.run_in_executor(
                 None, functools.partial(
                     run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY,
-                    site_domain, WOWAI_KEY, progress_cb
+                    site_domain, WOWAI_KEY, progress_cb, source_lang, translate_only
                 )
             )
             if not result['ok']:
@@ -644,6 +823,15 @@ async def run_fixes(message: Message, state: FSMContext):
         except Exception as e:
             log.error(f'Fix step {step_key} failed: {e}')
 
+    # Audit AFTER fixes — compare with before
+    audit_after = run_audit_on_dir(site_dir)
+    delta_issues = audit_before.get('failed', 0) - audit_after.get('failed', 0)
+    delta_text = (
+        f'\n\n📊 *Аудит до/после:*\n'
+        f'Проблем до: {audit_before.get("failed", 0)} → после: {audit_after.get("failed", 0)}'
+        + (f' (−{delta_issues} ✅)' if delta_issues > 0 else '')
+    )
+
     # Create PR — user-provided token takes priority over env var
     effective_token = data.get('user_github_token') or GITHUB_TOKEN
     await bot.edit_message_text(text='🚀 Создаю Pull Request...', chat_id=message.chat.id, message_id=status.message_id)
@@ -651,20 +839,31 @@ async def run_fixes(message: Message, state: FSMContext):
     pr_url = await create_pull_request(tmp_dir, site_dir, repo_slug, langs, {}, effective_token)
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    _processing_user_id = None
+    _active_job = None
     await state.clear()
+
+    # Start next queued job if any
+    if _job_queue:
+        next_job = _job_queue.popleft()
+        await bot.send_message(
+            next_job['chat_id'],
+            '▶️ *Твой сайт начинает обрабатываться!*',
+            parse_mode='Markdown'
+        )
+        asyncio.create_task(_process_queued_job(next_job))
 
     if pr_url:
         await bot.edit_message_text(
             text=(f'✅ *Готово!*\n\n'
                   f'Pull Request создан:\n{pr_url}\n\n'
-                  f'Проверь изменения и нажми Merge.'),
+                  f'Проверь изменения и нажми Merge.'
+                  + delta_text),
             chat_id=message.chat.id, message_id=status.message_id, parse_mode='Markdown'
         )
     elif not effective_token:
         await bot.edit_message_text(
             text=('✅ *Исправления применены локально.*\n\n'
-                  '⚠️ PR не создан — токен не введён.'),
+                  '⚠️ PR не создан — токен не введён.' + delta_text),
             chat_id=message.chat.id, message_id=status.message_id, parse_mode='Markdown'
         )
     else:
@@ -672,9 +871,129 @@ async def run_fixes(message: Message, state: FSMContext):
             text=('✅ *Исправления применены локально.*\n\n'
                   '❌ PR не создан — ошибка GitHub API. '
                   'Проверь что токен действителен и имеет права `repo`. '
-                  'Подробности в логах Railway.'),
+                  'Подробности в логах Railway.' + delta_text),
             chat_id=message.chat.id, message_id=status.message_id, parse_mode='Markdown'
         )
+
+
+async def _process_queued_job(job: dict):
+    """Start processing a job that was waiting in queue."""
+    global _active_job
+    _active_job = job
+    # Reconstruct a minimal context to call run_fixes equivalent
+    # The job dict contains all needed data — call run_fixes_from_data directly
+    await run_fixes_from_data(job['chat_id'], job['data'], job.get('mode', 'full'))
+
+
+async def run_fixes_from_data(chat_id: int, data: dict, mode: str):
+    """
+    Process a queued job: run fixes and create PR using stored data dict.
+    Used when starting a queued job after the previous one finishes.
+    """
+    global _active_job, _job_queue
+
+    tmp_dir        = data['tmp_dir']
+    site_dir       = data.get('site_dir', tmp_dir)
+    repo_slug      = data['repo_slug']
+    langs          = sorted(data['selected_langs'])
+    site_domain    = data.get('site_domain')
+    translate_only = (mode == 'translate_only')
+
+    from fixes import run_all_fixes
+    from translate import detect_source_lang
+    import functools
+
+    seo_only = (mode == 'seo_only')
+
+    source_lang = await asyncio.get_event_loop().run_in_executor(
+        None, detect_source_lang, site_dir
+    )
+
+    from audit import run_audit_on_dir
+    audit_before = run_audit_on_dir(site_dir)
+
+    status = await bot.send_message(chat_id, '⚙️ Начинаю обработку...')
+    loop = asyncio.get_event_loop()
+
+    SEO_STEPS = [
+        ('🧹 Очищаю archive.org скрипты...', 'fix_archive_scripts'),
+        ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
+        ('📅 Обновляю год в заголовках...', 'fix_title_refresh'),
+        ('📝 Генерирую descriptions...', 'fix_descriptions'),
+        ('🗂️ Добавляю Schema.org...', 'fix_schema'),
+        ('🖼️ Добавляю OG images...', 'fix_og_image'),
+        ('🚫 Добавляю nofollow...', 'fix_nofollow'),
+        ('🤖 Генерирую robots.txt...', 'fix_robots_txt'),
+    ]
+    TRANSLATE_STEPS = [
+        ('🌍 Запускаю переводы...', 'fix_translations'),
+        ('🌐 Добавляю hreflang...', 'fix_hreflang_translated'),
+        ('🔗 Добавляю внутренние ссылки...', 'fix_internal_links'),
+        ('🔗 Обновляю lang switcher...', 'fix_lang_switcher'),
+    ]
+
+    if translate_only:
+        steps = [
+            ('🌍 Запускаю переводы...', 'fix_translations'),
+            ('🌐 Добавляю hreflang...', 'fix_hreflang_translated'),
+            ('🔗 Обновляю lang switcher...', 'fix_lang_switcher'),
+        ]
+    elif seo_only:
+        steps = SEO_STEPS
+    else:
+        steps = SEO_STEPS + TRANSLATE_STEPS
+
+    for step_text, step_key in steps:
+        await bot.edit_message_text(text=step_text, chat_id=chat_id, message_id=status.message_id)
+        try:
+            progress_cb = None
+            if step_key == 'fix_translations':
+                _cid = chat_id
+                _mid = status.message_id
+                def progress_cb(done, total, cid=_cid, mid=_mid):
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(
+                            text=f'🌍 Перевод: {done}/{total} страниц...',
+                            chat_id=cid, message_id=mid,
+                        ), loop,
+                    )
+            result = await loop.run_in_executor(
+                None, functools.partial(
+                    run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY,
+                    site_domain, WOWAI_KEY, progress_cb, source_lang, translate_only
+                )
+            )
+            if not result['ok']:
+                log.warning(f'Step {step_key}: {result["error"]}')
+        except Exception as e:
+            log.error(f'Fix step {step_key} failed: {e}')
+
+    audit_after = run_audit_on_dir(site_dir)
+    delta_issues = audit_before.get('failed', 0) - audit_after.get('failed', 0)
+    delta_text = (
+        f'\n\n📊 *Аудит до/после:*\n'
+        f'Проблем до: {audit_before.get("failed", 0)} → после: {audit_after.get("failed", 0)}'
+        + (f' (−{delta_issues} ✅)' if delta_issues > 0 else '')
+    )
+
+    effective_token = data.get('user_github_token') or GITHUB_TOKEN
+    await bot.edit_message_text(text='🚀 Создаю Pull Request...', chat_id=chat_id, message_id=status.message_id)
+    pr_url = await create_pull_request(tmp_dir, site_dir, repo_slug, langs, {}, effective_token)
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    _active_job = None
+
+    if _job_queue:
+        next_job = _job_queue.popleft()
+        await bot.send_message(next_job['chat_id'], '▶️ *Твой сайт начинает обрабатываться!*', parse_mode='Markdown')
+        asyncio.create_task(_process_queued_job(next_job))
+
+    result_text = (
+        f'✅ *Готово!*\n\nPull Request создан:\n{pr_url}\n\nПроверь изменения и нажми Merge.' + delta_text
+        if pr_url else
+        f'✅ *Готово!*\n\n⚠️ PR не создан — проверь токен.' + delta_text
+    )
+    await bot.edit_message_text(text=result_text, chat_id=chat_id, message_id=status.message_id, parse_mode='Markdown')
 
 
 async def create_pull_request(
@@ -809,11 +1128,12 @@ def estimate_processing_time(site_dir: str, langs: list) -> str:
     MIN_PER_REAL_PAGE_6L = 4.0   # empirical: 4 min per ~50-seg page × 6 langs
     MIN_PER_STUB_6L = 0.2        # stubs are near-instant
 
-    LANG_DIRS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
+    _SKIP = set(ALL_TARGET_LANGS) | {'.git', 'node_modules', 'scripts', 'images', 'css',
+                                      'web.archive.org', 'web-static.archive.org'}
     real = 0
     stubs = 0
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in LANG_DIRS + ['.git', 'node_modules', 'scripts', 'images', 'css']]
+        dirs[:] = [d for d in dirs if d not in _SKIP]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -837,11 +1157,17 @@ def estimate_processing_time(site_dir: str, langs: list) -> str:
                 stubs += 1
 
     n = len(langs)
+    total = real + stubs
+    if n == 0:
+        # seo_only mode — no translation, estimate ~30s per page
+        minutes = total * 0.05
+        lo = max(1, int(minutes * 0.85))
+        hi = max(2, int(minutes * 1.2))
+        return f'~{lo}–{hi} мин ({total} стр., только SEO)'
     scale = n / LANGS_REF
     minutes = (real * MIN_PER_REAL_PAGE_6L + stubs * MIN_PER_STUB_6L) * scale
     lo = max(1, int(minutes * 0.85))
     hi = int(minutes * 1.2)
-    total = real + stubs
     return f'~{lo}–{hi} мин ({total} стр. × {n} яз., {real} с контентом)'
 
 
@@ -865,7 +1191,8 @@ def format_audit_report(results: dict, repo_slug: str, langs: list) -> str:
     else:
         lines.append('✅ Критических проблем не найдено')
 
-    lines.append(f'\n🌍 Переводы: {", ".join(l.upper() for l in langs)}')
+    if langs:
+        lines.append(f'\n🌍 Переводы: {", ".join(l.upper() for l in langs)}')
     return '\n'.join(lines)
 
 

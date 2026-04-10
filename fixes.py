@@ -10,13 +10,17 @@ import subprocess
 import json
 
 
-LANG_DIRS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
+LANG_DIRS = [
+    'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
+    'el', 'uk', 'ko', 'zh', 'ja', 'sk', 'fi', 'ar', 'hi',
+]
 ARCHIVE_DIRS = ['web.archive.org', 'web-static.archive.org', 'gmpg.org']
 
 
 def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
                   site_domain: str = None, wowai_key: str = None,
-                  progress_callback=None) -> dict:
+                  progress_callback=None, source_lang: str = 'en',
+                  translate_only: bool = False) -> dict:
     """Dispatcher — runs a specific fix step."""
     try:
         if step_key == 'fix_archive_scripts':
@@ -34,16 +38,16 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
         elif step_key == 'fix_robots_txt':
             fix_robots_txt(site_dir, site_domain)
         elif step_key == 'fix_hreflang_translated':
-            fix_hreflang_translated(site_dir, langs, site_domain)
+            fix_hreflang_translated(site_dir, langs, site_domain, source_lang=source_lang)
         elif step_key == 'fix_translations':
             fix_translations(site_dir, langs, wowai_key or groq_api_key, site_domain,
-                             progress_callback)
+                             progress_callback, translate_only=translate_only)
         elif step_key == 'fix_internal_links':
             fix_internal_links(site_dir)
         elif step_key == 'fix_title_refresh':
             fix_title_refresh(site_dir)
         elif step_key == 'fix_lang_switcher':
-            fix_lang_switcher(site_dir)
+            fix_lang_switcher(site_dir, source_lang=source_lang)
         return {'ok': True}
     except Exception as e:
         return {'ok': False, 'error': str(e)}
@@ -512,10 +516,11 @@ def fix_robots_txt(site_dir: str, site_domain: str = None):
         f.write(content)
 
 
-def fix_hreflang_translated(site_dir: str, langs: list, site_domain: str = None):
+def fix_hreflang_translated(site_dir: str, langs: list, site_domain: str = None,
+                            source_lang: str = 'en'):
     """
     Add hreflang tags to translated pages that are missing them.
-    Mirrors the hreflang block from the corresponding English source page.
+    Mirrors the hreflang block from the corresponding source page.
     """
     if not langs:
         return
@@ -559,7 +564,7 @@ def fix_hreflang_translated(site_dir: str, langs: list, site_domain: str = None)
                     # Build hreflang block from scratch
                     rel_path = rel_from_lang.replace(os.sep, '/').replace('index.html', '')
                     hreflang_tags = [
-                        f'<link rel="alternate" hreflang="en" href="{BASE_URL}/{rel_path}">',
+                        f'<link rel="alternate" hreflang="{source_lang}" href="{BASE_URL}/{rel_path}">',
                         f'<link rel="alternate" hreflang="{lang}" href="{BASE_URL}/{lang}/{rel_path}">',
                         f'<link rel="alternate" hreflang="x-default" href="{BASE_URL}/{rel_path}">',
                     ]
@@ -583,7 +588,7 @@ def _count_translatable_pages(site_dir: str) -> int:
 
 
 def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str = None,
-                     progress_callback=None):
+                     progress_callback=None, translate_only: bool = False):
     """Run translation script on the site directory."""
     translate_script = os.path.join(site_dir, 'scripts', 'translate.py')
     our_script = os.path.join(os.path.dirname(__file__), 'translate.py')
@@ -712,7 +717,10 @@ def fix_internal_links(site_dir: str):
         'all','also','more','other','new','use','used','using','get','our',
         'page','click','here','read','view','find','see','learn','check',
     }
-    LANG_DIRS = {'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr'}
+    LANG_DIRS = {
+        'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
+        'el', 'uk', 'ko', 'zh', 'ja', 'sk', 'fi', 'ar', 'hi',
+    }
     SKIP_DIRS = LANG_DIRS | set(ARCHIVE_DIRS) | {'scripts', 'images', 'css', '.git', 'node_modules'}
 
     # ── Step 1: collect all EN HTML pages ──
@@ -842,10 +850,11 @@ def fix_internal_links(site_dir: str):
                 f.write(new_html)
 
 
-def fix_lang_switcher(site_dir: str):
+def fix_lang_switcher(site_dir: str, source_lang: str = 'en'):
     """
     Inject a floating language switcher dropdown into every HTML page.
     Detects available languages from subdirectories and builds relative links.
+    source_lang: the root language of the site (default 'en').
     """
     LANG_NAMES = {
         'en': ('🇬🇧', 'English'),
@@ -863,15 +872,19 @@ def fix_lang_switcher(site_dir: str):
         'pl': ('🇵🇱', 'Polski'),
         'tr': ('🇹🇷', 'Türkçe'),
         'uk': ('🇺🇦', 'Українська'),
+        'el': ('🇬🇷', 'Ελληνικά'),
         'cs': ('🇨🇿', 'Čeština'),
         'ro': ('🇷🇴', 'Română'),
         'sv': ('🇸🇪', 'Svenska'),
+        'sk': ('🇸🇰', 'Slovenčina'),
+        'fi': ('🇫🇮', 'Suomi'),
+        'hi': ('🇮🇳', 'हिन्दी'),
     }
 
     # Detect which languages actually exist as subdirectories
-    available_langs = ['en']  # English is always the root
+    available_langs = [source_lang]  # source lang is always the root
     for entry in sorted(os.listdir(site_dir)):
-        if entry in LANG_NAMES and os.path.isdir(os.path.join(site_dir, entry)):
+        if entry in LANG_NAMES and entry != source_lang and os.path.isdir(os.path.join(site_dir, entry)):
             available_langs.append(entry)
 
     if len(available_langs) <= 1:
@@ -936,7 +949,7 @@ def fix_lang_switcher(site_dir: str):
                 slug = '/'.join(parts[1:])  # e.g. "index.html" or "about/index.html"
                 to_root = '../' * depth
             else:
-                current_lang = 'en'
+                current_lang = source_lang
                 slug = rel  # e.g. "index.html" or "about-us.html"
                 to_root = '../' * depth if depth > 0 else ''
 
