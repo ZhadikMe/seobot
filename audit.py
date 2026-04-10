@@ -21,7 +21,8 @@ def run_audit_on_dir(site_dir: str) -> dict:
     pages = []
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs
-                   if d not in LANGS + ['scripts', 'images', 'css', '.git', 'node_modules', '_git_clone']]
+                   if d not in LANGS + ['scripts', 'images', 'css', '.git', 'node_modules',
+                                        '_git_clone', 'web.archive.org', 'web-static.archive.org', 'gmpg.org']]
         for fname in files:
             if fname.endswith('.html'):
                 pages.append(os.path.join(root, fname))

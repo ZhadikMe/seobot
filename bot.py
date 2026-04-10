@@ -1141,9 +1141,9 @@ def _build_delta_text(audit_before: dict, audit_after: dict) -> str:
 
     text = '\n\n📊 *Аудит до/после:*'
     if fixed_lines:
-        text += '\n' + '\n'.join(fixed_lines)
+        text += '\n*Исправлено:*\n' + '\n'.join(fixed_lines)
     if remaining_lines:
-        text += '\n' + '\n'.join(remaining_lines)
+        text += '\n*Остались нерешёнными:*\n' + '\n'.join(remaining_lines)
     if not fixed_lines and not remaining_lines:
         text += (f'\n  Страниц с проблемами: '
                  f'{audit_before.get("failed", 0)} → {audit_after.get("failed", 0)}')
