@@ -286,16 +286,15 @@ def extract_translatable(html: str) -> list[str]:
             if not _should_skip_segment(text):
                 segments.append(text)
 
-    # ── Headings (strip inner tags like <a>, <span>) ──
+    # ── Headings — split by inner tags (<br/>, <span>, <a>…) so each text node
+    #    is a separate segment that patch_html can locate and replace in-place ──
     for tag in ['h1', 'h2', 'h3', 'h4']:
         for m in re.finditer(rf'<{tag}[^>]*>(.*?)</{tag}>', html, re.IGNORECASE | re.DOTALL):
-            text = re.sub(r'<[^>]+>', '', m.group(1)).strip()
-            if text and len(text) > 2 and not text.startswith('http'):
-                pos = m.start()
-                preceding = html[max(0, pos - 200):pos]
-                if '<script' not in preceding and '<style' not in preceding:
-                    if not _should_skip_segment(text):
-                        segments.append(text)
+            pos = m.start()
+            preceding = html[max(0, pos - 200):pos]
+            if '<script' in preceding or '<style' in preceding:
+                continue
+            _extract_text_nodes(m.group(1), segments, min_len=3)
 
     # ── Body content: paragraphs, list items, table cells, buttons ──
     main_m = re.search(r'<(?:main|article)[^>]*>(.*?)</(?:main|article)>', html, re.DOTALL | re.IGNORECASE)
@@ -447,6 +446,10 @@ def patch_html(html: str, translations: dict, lang: str, original_rel_path: str)
         if not translated or original == translated:
             continue
         escaped = re.escape(original)
+        # Segments are extracted with whitespace collapsed (newline → space).
+        # HTML may retain original whitespace (newlines, tabs, extra spaces).
+        # re.escape converts spaces to '\ ' — replace with \s+ to match any whitespace.
+        escaped = escaped.replace(r'\ ', r'\s+')
 
         # 1. Text nodes between tags
         patched = re.sub(
