@@ -1129,7 +1129,7 @@ def estimate_processing_time(site_dir: str, langs: list) -> str:
     MIN_PER_STUB_6L = 0.2        # stubs are near-instant
 
     _SKIP = set(ALL_TARGET_LANGS) | {'.git', 'node_modules', 'scripts', 'images', 'css',
-                                      'web.archive.org', 'web-static.archive.org'}
+                                      'web.archive.org', 'web-static.archive.org', '_git_clone'}
     real = 0
     stubs = 0
     for root, dirs, files in os.walk(site_dir):

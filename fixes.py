@@ -14,7 +14,7 @@ LANG_DIRS = [
     'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
     'el', 'uk', 'ko', 'zh', 'ja', 'sk', 'fi', 'ar', 'hi',
 ]
-ARCHIVE_DIRS = ['web.archive.org', 'web-static.archive.org', 'gmpg.org']
+ARCHIVE_DIRS = ['web.archive.org', 'web-static.archive.org', 'gmpg.org', '_git_clone']
 
 
 def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
@@ -580,7 +580,7 @@ def _count_translatable_pages(site_dir: str) -> int:
     """Count HTML pages that will be translated (excluding lang dirs)."""
     count = 0
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in LANG_DIRS + ['.git', 'node_modules', 'scripts']]
+        dirs[:] = [d for d in dirs if d not in LANG_DIRS + ARCHIVE_DIRS + ['.git', 'node_modules', 'scripts']]
         for fname in files:
             if fname.endswith('.html'):
                 count += 1
@@ -634,7 +634,7 @@ def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str 
                 stderr_tail.append(line)
                 if len(stderr_tail) > 50:
                     stderr_tail.pop(0)
-                if progress_callback and 'hreflang' in line and 'EN page' in line:
+                if progress_callback and 'hreflang' in line and 'en page' in line.lower():
                     done_pages += 1
                     try:
                         progress_callback(done_pages, total_pages)

@@ -13,12 +13,15 @@ def run_audit_on_dir(site_dir: str) -> dict:
     Audit all HTML pages in site_dir.
     Returns: {total, passed, failed, issues: [...]}
     """
-    LANGS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
+    LANGS = [
+        'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
+        'el', 'uk', 'ko', 'zh', 'ja', 'sk', 'fi', 'ar', 'hi',
+    ]
 
     pages = []
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs
-                   if d not in LANGS + ['scripts', 'images', 'css', '.git', 'node_modules']]
+                   if d not in LANGS + ['scripts', 'images', 'css', '.git', 'node_modules', '_git_clone']]
         for fname in files:
             if fname.endswith('.html'):
                 pages.append(os.path.join(root, fname))

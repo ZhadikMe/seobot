@@ -37,7 +37,7 @@ SUPPORTED_LANGS = {
     'sv': 'SV',
     'tr': 'TR',
     'el': 'EL',
-    'uk': 'UK',
+    'uk': 'UA',
     'ko': 'KO',
     'zh': 'ZH',
     'ja': 'JA',
@@ -114,7 +114,7 @@ def detect_source_lang(site_dir: str) -> str:
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs
                    if d not in list(SUPPORTED_LANGS.keys()) + ['scripts', '.git', 'node_modules',
-                                                                  'web.archive.org', 'web-static.archive.org']]
+                                                                  'web.archive.org', 'web-static.archive.org', '_git_clone']]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -614,7 +614,7 @@ def build_nav_cache(api_key: str, site_dir: str, target_langs: list,
     all_nav_segs: set[str] = set()
 
     skip_dirs = set(SUPPORTED_LANGS.keys()) | {'scripts', '.git', 'node_modules',
-                                                 'web.archive.org', 'web-static.archive.org'}
+                                                 'web.archive.org', 'web-static.archive.org', '_git_clone'}
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in skip_dirs]
         for fname in files:
@@ -778,7 +778,7 @@ def update_sitemap(translated_pages: dict):
 
     for root, dirs, files in os.walk(SITE):
         dirs[:] = [d for d in dirs
-                   if d not in ('scripts', 'images', 'node_modules', '.git', 'web.archive.org', 'web-static.archive.org', 'gmpg.org')
+                   if d not in ('scripts', 'images', 'node_modules', '.git', 'web.archive.org', 'web-static.archive.org', 'gmpg.org', '_git_clone')
                    + tuple(SUPPORTED_LANGS.keys())]
         for fname in files:
             if not fname.endswith('.html'):
