@@ -218,6 +218,7 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
         headers={
             'Authorization': f'Bearer {groq_api_key}',
             'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0',
         }
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
@@ -225,13 +226,17 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
 
     result = data['choices'][0]['message']['content'].strip().strip('"').strip("'")
 
-    # Validate: must be different from existing, right length
+    # Validate: must be different from existing and have some content
     if existing and result.lower()[:50] == existing.lower()[:50]:
         return None
-    if len(result) < 80 or len(result) > 170:
+    if len(result) < 50:
         return None
 
-    return result[:155]
+    # Trim to 155 chars at word boundary
+    if len(result) > 155:
+        result = result[:152].rsplit(' ', 1)[0].rstrip('.,;') + '...'
+
+    return result
 
 
 def fix_schema(site_dir: str, site_domain: str = None):
