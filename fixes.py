@@ -11,6 +11,7 @@ import json
 
 
 LANG_DIRS = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
+ARCHIVE_DIRS = ['web.archive.org', 'web-static.archive.org', 'gmpg.org']
 
 
 def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
@@ -66,7 +67,7 @@ def fix_archive_scripts(site_dir: str):
     ]
 
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -101,7 +102,7 @@ def fix_descriptions(site_dir: str, groq_api_key: str = None):
     """
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs
-                   if d not in LANG_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules']]
+                   if d not in LANG_DIRS + ARCHIVE_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules']]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -246,7 +247,7 @@ def fix_schema(site_dir: str, site_domain: str = None):
 
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs
-                   if d not in LANG_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules']]
+                   if d not in LANG_DIRS + ARCHIVE_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules']]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -334,7 +335,7 @@ def fix_canonical(site_dir: str, site_domain: str = None):
     is_placeholder = (BASE_URL == 'https://example.com')
 
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -389,7 +390,7 @@ def fix_og_image(site_dir: str, site_domain: str = None):
     fallback_img = _find_fallback_og_image(site_dir, BASE_URL)
 
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -449,7 +450,7 @@ def _find_fallback_og_image(site_dir: str, base_url: str) -> str | None:
 def fix_nofollow(site_dir: str):
     """Add rel="nofollow noopener noreferrer" to all external links."""
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -527,7 +528,7 @@ def fix_hreflang_translated(site_dir: str, langs: list, site_domain: str = None)
             continue
 
         for root, dirs, files in os.walk(lang_dir):
-            dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
+            dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
             for fname in files:
                 if not fname.endswith('.html'):
                     continue
@@ -660,7 +661,7 @@ def fix_title_refresh(site_dir: str):
     updated = 0
 
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules']]
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -712,7 +713,7 @@ def fix_internal_links(site_dir: str):
         'page','click','here','read','view','find','see','learn','check',
     }
     LANG_DIRS = {'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr'}
-    SKIP_DIRS = LANG_DIRS | {'scripts', 'images', 'css', '.git', 'node_modules'}
+    SKIP_DIRS = LANG_DIRS | set(ARCHIVE_DIRS) | {'scripts', 'images', 'css', '.git', 'node_modules'}
 
     # ── Step 1: collect all EN HTML pages ──
     html_files = []
@@ -907,7 +908,7 @@ def fix_lang_switcher(site_dir: str):
 
     # Walk all HTML files
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules', 'scripts']]
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules', 'scripts'] + ARCHIVE_DIRS]
         for fname in files:
             if not fname.endswith('.html'):
                 continue
@@ -988,7 +989,7 @@ def _detect_base_url(site_dir: str, site_domain: str = None) -> str:
 
     # Try absolute canonical tags in HTML (more reliable than sitemap)
     for root, dirs, files in os.walk(site_dir):
-        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules', 'scripts']]
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules', 'scripts'] + ARCHIVE_DIRS]
         for fname in files:
             if not fname.endswith('.html'):
                 continue

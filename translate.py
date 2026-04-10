@@ -558,7 +558,7 @@ def update_sitemap(translated_pages: dict):
 
     for root, dirs, files in os.walk(SITE):
         dirs[:] = [d for d in dirs
-                   if d not in ('scripts', 'images', 'node_modules', '.git')
+                   if d not in ('scripts', 'images', 'node_modules', '.git', 'web.archive.org', 'web-static.archive.org', 'gmpg.org')
                    + tuple(SUPPORTED_LANGS.keys())]
         for fname in files:
             if not fname.endswith('.html'):
