@@ -1027,6 +1027,9 @@ async def create_pull_request(
 
         # ── Clone repo into a fresh directory ─────────────────────────────────
         clone_dir = os.path.join(tmp_dir, '_git_clone')
+        # Remove if already exists (leftover from previous run committed to repo)
+        if os.path.exists(clone_dir):
+            shutil.rmtree(clone_dir, ignore_errors=True)
         clone_url = f'https://x-access-token:{token}@github.com/{repo_slug}.git'
         log.info(f'Cloning {repo_slug} → {clone_dir}')
 
@@ -1042,7 +1045,7 @@ async def create_pull_request(
         SKIP_EXTENSIONS = {'.zip', '.tar', '.gz', '.rar', '.7z', '.mp4', '.mp3', '.mov', '.avi'}
         copied = 0
         for root, dirs, files in os.walk(site_dir):
-            dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules')]
+            dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', '_git_clone')]
             for fname in files:
                 if os.path.splitext(fname)[1].lower() in SKIP_EXTENSIONS:
                     continue
