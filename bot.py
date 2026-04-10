@@ -494,12 +494,24 @@ async def run_audit(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # If repo has a web.archive.org dump, always re-extract site/ from archive
-    # so we audit the original site state, not a potentially stale previous run.
+    # If repo has a web.archive.org dump and site/ is present:
+    # - First run (no lang dirs at root): delete site/ → re-extract from archive
+    # - Re-run (lang dirs exist at root from merged PR): preserve site/, copy lang
+    #   dirs into it so skip_existing in translate.py finds existing translations
+    _LANG_LIST = ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr']
     archive_in_repo = os.path.join(tmp_dir, 'web.archive.org')
     if os.path.isdir(archive_in_repo):
         stale_site = os.path.join(tmp_dir, 'site')
-        if os.path.isdir(stale_site):
+        root_langs = [l for l in _LANG_LIST if os.path.isdir(os.path.join(tmp_dir, l))]
+        if os.path.isdir(stale_site) and root_langs:
+            # Previously processed repo — copy root lang dirs into site/ for skip_existing
+            for lang in root_langs:
+                src = os.path.join(tmp_dir, lang)
+                dst = os.path.join(stale_site, lang)
+                if not os.path.isdir(dst):
+                    shutil.copytree(src, dst)
+            log.info(f'Re-run detected: copied lang dirs into site/ {root_langs}')
+        elif os.path.isdir(stale_site):
             shutil.rmtree(stale_site)
             log.info('Removed stale site/ — will re-extract from archive')
 
