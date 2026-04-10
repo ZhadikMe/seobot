@@ -1216,7 +1216,7 @@ def format_audit_report(results: dict, repo_slug: str, langs: list) -> str:
     if issues:
         lines.append('*Проблемы:*')
         for issue in issues[:10]:
-            lines.append(f'  • {issue}')
+            lines.append(f'  • {issue.replace("_", "\\_")}')
         if len(issues) > 10:
             lines.append(f'  _...и ещё {len(issues) - 10}_')
     else:
