@@ -882,7 +882,8 @@ def main():
     else:
         for root, dirs, files in os.walk(SITE):
             dirs[:] = [d for d in dirs
-                       if d not in ('scripts', 'images', 'node_modules', '.git')
+                       if d not in ('scripts', 'images', 'node_modules', '.git',
+                                    'web.archive.org', 'web-static.archive.org', 'gmpg.org', '_git_clone')
                        + tuple(SUPPORTED_LANGS.keys())]
             for fname in files:
                 if not fname.endswith('.html'):

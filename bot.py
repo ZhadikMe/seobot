@@ -825,12 +825,7 @@ async def run_fixes(message: Message, state: FSMContext):
 
     # Audit AFTER fixes — compare with before
     audit_after = run_audit_on_dir(site_dir)
-    delta_issues = audit_before.get('failed', 0) - audit_after.get('failed', 0)
-    delta_text = (
-        f'\n\n📊 *Аудит до/после:*\n'
-        f'Проблем до: {audit_before.get("failed", 0)} → после: {audit_after.get("failed", 0)}'
-        + (f' (−{delta_issues} ✅)' if delta_issues > 0 else '')
-    )
+    delta_text = _build_delta_text(audit_before, audit_after)
 
     # Create PR — user-provided token takes priority over env var
     effective_token = data.get('user_github_token') or GITHUB_TOKEN
@@ -969,12 +964,7 @@ async def run_fixes_from_data(chat_id: int, data: dict, mode: str):
             log.error(f'Fix step {step_key} failed: {e}')
 
     audit_after = run_audit_on_dir(site_dir)
-    delta_issues = audit_before.get('failed', 0) - audit_after.get('failed', 0)
-    delta_text = (
-        f'\n\n📊 *Аудит до/после:*\n'
-        f'Проблем до: {audit_before.get("failed", 0)} → после: {audit_after.get("failed", 0)}'
-        + (f' (−{delta_issues} ✅)' if delta_issues > 0 else '')
-    )
+    delta_text = _build_delta_text(audit_before, audit_after)
 
     effective_token = data.get('user_github_token') or GITHUB_TOKEN
     await bot.edit_message_text(text='🚀 Создаю Pull Request...', chat_id=chat_id, message_id=status.message_id)
@@ -1121,6 +1111,44 @@ async def create_pull_request(
 
 
 # ── Audit report formatter ────────────────────────────────────────────────────
+
+def _build_delta_text(audit_before: dict, audit_after: dict) -> str:
+    """Build a human-readable before/after audit summary."""
+    cb = audit_before.get('counts', {})
+    ca = audit_after.get('counts', {})
+    LABELS = [
+        ('no_canonical', 'canonical',    True),
+        ('no_desc',      'description',  True),
+        ('no_og_image',  'OG image',     True),
+        ('no_schema',    'Schema.org',   True),
+        ('no_h1',        'H1',           False),
+        ('no_h2',        'H2',           False),
+        ('thin_content', 'мало текста',  False),
+        ('few_links',    'мало ссылок',  False),
+    ]
+    fixed_lines = []
+    remaining_lines = []
+    for key, label, auto_fixable in LABELS:
+        before = cb.get(key, 0)
+        after = ca.get(key, 0)
+        if before > 0 and after == 0:
+            fixed_lines.append(f'  ✅ {label}: исправлено ({before} стр.)')
+        elif before > 0 and after < before:
+            fixed_lines.append(f'  ✅ {label}: частично ({before}→{after} стр.)')
+        elif after > 0:
+            note = '' if auto_fixable else ' _(ручная правка)_'
+            remaining_lines.append(f'  ⚠️ {label}: {after} стр.{note}')
+
+    text = '\n\n📊 *Аудит до/после:*'
+    if fixed_lines:
+        text += '\n' + '\n'.join(fixed_lines)
+    if remaining_lines:
+        text += '\n' + '\n'.join(remaining_lines)
+    if not fixed_lines and not remaining_lines:
+        text += (f'\n  Страниц с проблемами: '
+                 f'{audit_before.get("failed", 0)} → {audit_after.get("failed", 0)}')
+    return text
+
 
 def estimate_processing_time(site_dir: str, langs: list) -> str:
     """

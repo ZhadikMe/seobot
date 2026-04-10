@@ -30,6 +30,11 @@ def run_audit_on_dir(site_dir: str) -> dict:
     passed = 0
     failed = 0
     issues = []
+    counts = {
+        'no_title': 0, 'no_desc': 0, 'no_h1': 0, 'no_h2': 0,
+        'no_canonical': 0, 'no_og_image': 0, 'no_schema': 0,
+        'thin_content': 0, 'few_links': 0,
+    }
 
     for fpath in pages:
         rel = fpath.replace(site_dir, '').replace(os.sep, '/').lstrip('/')
@@ -47,6 +52,7 @@ def run_audit_on_dir(site_dir: str) -> dict:
         title_m = re.search(r'<title>([^<]+)</title>', html)
         if not title_m:
             issues.append(f'❌ {rel}: нет title')
+            counts['no_title'] += 1
             page_ok = False
         else:
             t = title_m.group(1).strip()
@@ -61,6 +67,7 @@ def run_audit_on_dir(site_dir: str) -> dict:
         desc_m = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content="([^"]+)"', html, re.IGNORECASE)
         if not desc_m:
             issues.append(f'❌ {rel}: нет description')
+            counts['no_desc'] += 1
             page_ok = False
         else:
             d = desc_m.group(1).strip()
@@ -75,6 +82,7 @@ def run_audit_on_dir(site_dir: str) -> dict:
         h1_matches = re.findall(r'<h1[^>]*>.*?</h1>', html, re.IGNORECASE | re.DOTALL)
         if not h1_matches:
             issues.append(f'❌ {rel}: нет H1')
+            counts['no_h1'] += 1
             page_ok = False
         elif len(h1_matches) > 1:
             issues.append(f'⚠️ {rel}: несколько H1 ({len(h1_matches)} шт, должен быть 1)')
@@ -83,21 +91,25 @@ def run_audit_on_dir(site_dir: str) -> dict:
         # 4. H2 — at least one (needed for content structure)
         if not re.search(r'<h2[^>]*>', html, re.IGNORECASE):
             issues.append(f'⚠️ {rel}: нет H2 (рекомендуется минимум 1 для структуры)')
+            counts['no_h2'] += 1
             page_ok = False
 
         # 5. Canonical
         if not re.search(r'rel=["\']canonical["\']', html, re.IGNORECASE):
             issues.append(f'❌ {rel}: нет canonical')
+            counts['no_canonical'] += 1
             page_ok = False
 
         # 6. OG image
         if not re.search(r'og:image', html):
             issues.append(f'⚠️ {rel}: нет og:image')
+            counts['no_og_image'] += 1
             page_ok = False
 
         # 7. Schema.org
         if not re.search(r'application/ld\+json', html):
             issues.append(f'⚠️ {rel}: нет Schema.org (JSON-LD)')
+            counts['no_schema'] += 1
             page_ok = False
 
         # 8. Word count — with body fallback (many sites don't use <main>)
@@ -107,6 +119,7 @@ def run_audit_on_dir(site_dir: str) -> dict:
                 issues.append(f'❌ {rel}: очень мало текста ({word_count} слов) — рекомендуется noindex')
             else:
                 issues.append(f'⚠️ {rel}: мало текста ({word_count} слов, норма ≥200)')
+            counts['thin_content'] += 1
             page_ok = False
 
         # 9. Internal links count (skip homepage index.html)
@@ -120,6 +133,7 @@ def run_audit_on_dir(site_dir: str) -> dict:
             real_links = [l for l in internal_links if l and l != '#' and not l.startswith('javascript')]
             if len(real_links) < 2:
                 issues.append(f'⚠️ {rel}: мало внутренних ссылок ({len(real_links)} шт, норма ≥2)')
+                counts['few_links'] += 1
                 page_ok = False
 
         if page_ok:
@@ -132,6 +146,7 @@ def run_audit_on_dir(site_dir: str) -> dict:
         'passed': passed,
         'failed': failed,
         'issues': issues,
+        'counts': counts,
     }
 
 
