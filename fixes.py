@@ -8,6 +8,14 @@ import re
 import sys
 import subprocess
 import json
+import time
+import calendar
+
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
 
 
 LANG_DIRS = [
@@ -48,6 +56,12 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
             fix_title_refresh(site_dir)
         elif step_key == 'fix_lang_switcher':
             fix_lang_switcher(site_dir, source_lang=source_lang)
+        elif step_key == 'fix_h2':
+            fix_h2(site_dir, langs, groq_api_key)
+        elif step_key == 'fix_thin_content':
+            fix_thin_content(site_dir, langs, groq_api_key)
+        elif step_key == 'fix_lang_descriptions':
+            fix_lang_descriptions(site_dir, langs, groq_api_key)
         return {'ok': True}
     except Exception as e:
         return {'ok': False, 'error': str(e)}
@@ -100,10 +114,13 @@ def fix_archive_scripts(site_dir: str):
 
 def fix_descriptions(site_dir: str, groq_api_key: str = None):
     """
-    Generate unique page-specific descriptions via Groq (if key provided),
-    or trim descriptions longer than 155 chars.
-    Also syncs og:description and twitter:description.
+    Generate unique page-specific descriptions via Groq for root EN pages,
+    then batch-translate to all lang subdirectories.
+    Also syncs og:description.
     """
+    # ── Pass 1: fix root (EN) pages ───────────────────────────────────────────
+    root_descs = {}  # fname → description
+
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs
                    if d not in LANG_DIRS + ARCHIVE_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules']]
@@ -115,61 +132,480 @@ def fix_descriptions(site_dir: str, groq_api_key: str = None):
                 html = f.read()
 
             original = html
-
-            # Try to generate a unique description via Groq
             new_desc = None
             if groq_api_key:
                 try:
                     new_desc = _generate_description(html, groq_api_key)
+                    time.sleep(0.5)  # gentle rate-limit
                 except Exception:
                     pass
 
             if new_desc:
-                # Replace or insert meta description
-                if re.search(r'<meta[^>]*name=["\']description["\']', html, re.IGNORECASE):
-                    html = re.sub(
-                        r'(<meta[^>]*name=["\']description["\'][^>]*content=")[^"]*(")',
-                        lambda m: m.group(1) + new_desc + m.group(2),
-                        html, flags=re.IGNORECASE
-                    )
-                else:
-                    html = html.replace(
-                        '</head>',
-                        f'<meta name="description" content="{new_desc}">\n</head>', 1
-                    )
+                html = _upsert_description(html, new_desc)
             else:
-                # Fallback: just trim if too long
+                # Fallback: trim if too long
                 html = re.sub(
                     r'(<meta[^>]*name=["\']description["\'][^>]*content=")([^"]{156,})(")',
                     lambda m: m.group(1) + (m.group(2)[:152].rsplit(' ', 1)[0] + '...') + m.group(3),
                     html, flags=re.IGNORECASE
                 )
 
-            # Sync og:description
-            desc_m = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content="([^"]+)"', html, re.IGNORECASE)
-            if desc_m:
-                desc_val = desc_m.group(1)
-                if re.search(r'og:description', html):
-                    html = re.sub(
-                        r'(<meta[^>]*property=["\']og:description["\'][^>]*content=")[^"]*(")',
-                        lambda m: m.group(1) + desc_val + m.group(2),
-                        html
-                    )
-                else:
-                    html = html.replace(
-                        '</head>',
-                        f'<meta property="og:description" content="{desc_val}">\n</head>', 1
-                    )
+            html = _sync_og_description(html)
 
             if html != original:
                 with open(fpath, 'w', encoding='utf-8') as f:
                     f.write(html)
 
+            # Collect the final description for lang propagation
+            rel = os.path.relpath(fpath, site_dir)
+            desc_m = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content="([^"]+)"',
+                               html, re.IGNORECASE)
+            if desc_m:
+                root_descs[rel] = desc_m.group(1).strip()
+
+    # ── Pass 2: propagate to lang directories ─────────────────────────────────
+    if groq_api_key and root_descs:
+        fix_lang_descriptions(site_dir, LANG_DIRS, groq_api_key, root_descs=root_descs)
+
+
+def _upsert_description(html: str, desc: str) -> str:
+    """Insert or replace meta description (no apostrophe escaping in double-quoted attrs)."""
+    new_meta = f'<meta name="description" content="{desc}">'
+    if re.search(r'<meta[^>]*name=["\']description["\']', html, re.IGNORECASE):
+        return re.sub(
+            r'<meta[^>]*name=["\']description["\'][^>]*>',
+            new_meta, html, flags=re.IGNORECASE, count=1
+        )
+    head_close = html.find('</head>')
+    if head_close >= 0:
+        return html[:head_close] + new_meta + '\n' + html[head_close:]
+    return html
+
+
+def _sync_og_description(html: str) -> str:
+    """Sync og:description to match meta description."""
+    desc_m = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content="([^"]+)"',
+                       html, re.IGNORECASE)
+    if not desc_m:
+        return html
+    desc_val = desc_m.group(1)
+    new_og = f'<meta property="og:description" content="{desc_val}">'
+    if re.search(r'og:description', html):
+        return re.sub(
+            r'<meta[^>]*property=["\']og:description["\'][^>]*>',
+            new_og, html, flags=re.IGNORECASE, count=1
+        )
+    head_close = html.find('</head>')
+    if head_close >= 0:
+        return html[:head_close] + new_og + '\n' + html[head_close:]
+    return html
+
+
+def fix_lang_descriptions(site_dir: str, langs: list, groq_api_key: str,
+                          root_descs: dict = None) -> None:
+    """
+    Translate root EN descriptions to all lang subdirs using batch Groq calls.
+    root_descs: {relative_path → description} — collected from root pass.
+                If None, reads from root files directly.
+    """
+    if root_descs is None:
+        root_descs = {}
+        for fname in os.listdir(site_dir):
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(site_dir, fname)
+            try:
+                html = open(fpath, encoding='utf-8', errors='ignore').read()
+                m = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content="([^"]+)"',
+                              html, re.IGNORECASE)
+                if m and 50 <= len(m.group(1)) <= 160:
+                    root_descs[fname] = m.group(1).strip()
+            except Exception:
+                pass
+
+    if not root_descs:
+        return
+
+    # Get unique descriptions to translate
+    unique_descs = list(dict.fromkeys(root_descs.values()))  # deduplicated, order preserved
+    desc_to_translation = {}  # en_desc → {lang → translated}
+
+    for lang in langs:
+        lang_dir = os.path.join(site_dir, lang)
+        if not os.path.isdir(lang_dir):
+            continue
+        lang_name = _GROQ_LANG_NAMES.get(lang, lang)
+
+        # Batch translate all unique descriptions at once
+        try:
+            translated = _groq_translate_batch(groq_api_key, unique_descs, lang_name)
+            for en_desc, tr_desc in zip(unique_descs, translated):
+                desc_to_translation.setdefault(en_desc, {})[lang] = tr_desc
+            time.sleep(1.5)
+        except Exception:
+            continue
+
+        # Apply to lang files
+        for rel_path, en_desc in root_descs.items():
+            lang_fpath = os.path.join(lang_dir, os.path.basename(rel_path))
+            if not os.path.exists(lang_fpath):
+                continue
+            tr_desc = desc_to_translation.get(en_desc, {}).get(lang, en_desc)
+            # Clamp to 160 chars
+            if len(tr_desc) > 160:
+                tr_desc = tr_desc[:157].rsplit(' ', 1)[0] + '...'
+            if len(tr_desc) < 30:
+                tr_desc = en_desc
+            try:
+                html = open(lang_fpath, encoding='utf-8', errors='ignore').read()
+                # Only update if missing or bad length
+                existing_m = re.search(
+                    r'<meta[^>]*name=["\']description["\'][^>]*content="([^"]+)"', html, re.IGNORECASE)
+                existing = existing_m.group(1).strip() if existing_m else ''
+                if existing and 50 <= len(existing) <= 160:
+                    continue
+                html = _upsert_description(html, tr_desc)
+                html = _sync_og_description(html)
+                with open(lang_fpath, 'w', encoding='utf-8') as f:
+                    f.write(html)
+            except Exception:
+                pass
+
+
+def fix_h2(site_dir: str, langs: list, groq_api_key: str = None) -> None:
+    """
+    Insert H2 headings in pages that lack them (posts, static pages).
+    Generates H2 from H1 + content snippet, then translates for lang versions.
+    """
+    SKIP = set(LANG_DIRS + ARCHIVE_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules'])
+
+    pages_fixed = {}  # fname → h2_text (EN)
+
+    # ── Pass 1: fix root EN pages ─────────────────────────────────────────────
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if os.path.basename(d) not in SKIP]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            html = open(fpath, encoding='utf-8', errors='ignore').read()
+
+            # Check if H2 is already in entry-content area
+            ec_start = html.find('<div class="entry-content">')
+            if ec_start < 0:
+                ec_start = html.find('<main')
+                if ec_start < 0:
+                    ec_start = html.find('<article')
+            if ec_start < 0:
+                continue
+
+            window = html[ec_start:ec_start + 600]
+            if re.search(r'<h2[^>]*class=["\']entry-heading', window, re.IGNORECASE):
+                continue  # already has our H2
+            if re.search(r'<h2[^>]*>', window, re.IGNORECASE):
+                continue  # already has H2
+
+            # Generate H2 text
+            h2_text = _make_h2_text(html, groq_api_key)
+            if not h2_text:
+                continue
+
+            # Insert H2 right after entry-content opening tag
+            insert_pos = html.find('>', ec_start) + 1
+            html = html[:insert_pos] + f'\n<h2 class="entry-heading">{h2_text}</h2>' + html[insert_pos:]
+
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(html)
+
+            rel = os.path.relpath(fpath, site_dir)
+            pages_fixed[rel] = h2_text
+
+    if not pages_fixed or not groq_api_key:
+        return
+
+    # ── Pass 2: translate H2 to lang versions ────────────────────────────────
+    unique_h2s = list(dict.fromkeys(pages_fixed.values()))
+
+    for lang in langs:
+        lang_dir = os.path.join(site_dir, lang)
+        if not os.path.isdir(lang_dir):
+            continue
+        lang_name = _GROQ_LANG_NAMES.get(lang, lang)
+
+        try:
+            translated_h2s = _groq_translate_batch(groq_api_key, unique_h2s, lang_name)
+            h2_map = dict(zip(unique_h2s, translated_h2s))
+            time.sleep(1.5)
+        except Exception:
+            continue
+
+        for rel, en_h2 in pages_fixed.items():
+            lang_fpath = os.path.join(lang_dir, os.path.basename(rel))
+            if not os.path.exists(lang_fpath):
+                continue
+            tr_h2 = h2_map.get(en_h2, en_h2)
+            try:
+                html = open(lang_fpath, encoding='utf-8', errors='ignore').read()
+                if 'entry-heading' in html:
+                    continue
+                ec_start = html.find('<div class="entry-content">')
+                if ec_start < 0:
+                    ec_start = html.find('<main')
+                if ec_start < 0:
+                    continue
+                if re.search(r'<h2[^>]*>', html[ec_start:ec_start+600], re.IGNORECASE):
+                    continue
+                insert_pos = html.find('>', ec_start) + 1
+                html = html[:insert_pos] + f'\n<h2 class="entry-heading">{tr_h2}</h2>' + html[insert_pos:]
+                with open(lang_fpath, 'w', encoding='utf-8') as f:
+                    f.write(html)
+            except Exception:
+                pass
+
+
+def _make_h2_text(html: str, groq_api_key: str = None) -> str:
+    """Generate a short H2 heading from page content."""
+    h1_m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.IGNORECASE | re.DOTALL)
+    h1 = re.sub(r'<[^>]+>', '', h1_m.group(1)).strip() if h1_m else ''
+
+    # Archive pages: derive from H1 "Monthly Archives: Month Year"
+    arch_m = re.search(r'(?:Monthly\s+)?Archives?:\s+(.+)', h1, re.IGNORECASE)
+    if arch_m:
+        return f'Posts from {arch_m.group(1).strip()}'
+
+    # Use Groq if available
+    if groq_api_key and h1:
+        ec_start = html.find('<div class="entry-content">')
+        if ec_start < 0:
+            ec_start = html.find('<article')
+        snippet = ''
+        if ec_start >= 0:
+            chunk = html[ec_start:ec_start + 2000]
+            chunk = re.sub(r'<[^>]+>', ' ', chunk)
+            chunk = re.sub(r'\s+', ' ', chunk).strip()
+            words = chunk.split()
+            snippet = ' '.join(words[:60])
+
+        if snippet:
+            prompt = (
+                f'Write a short H2 subheading (4-8 words) for this page.\n'
+                f'Page title/H1: "{h1}"\n'
+                f'Content: {snippet}\n'
+                f'Requirements: plain text only, no markdown, no quotes, no punctuation at end.'
+            )
+            try:
+                result = _groq_call(groq_api_key, [{'role': 'user', 'content': prompt}],
+                                    max_tokens=30, temperature=0.4)
+                result = result.strip('"\'').strip()
+                if 3 < len(result) < 80:
+                    return result
+            except Exception:
+                pass
+
+    # Fallback: derive from H1
+    if not h1:
+        return ''
+    # Page-type fallbacks
+    if re.search(r'\b(album|ep|single)\b', h1, re.IGNORECASE):
+        return 'About the Album'
+    if re.search(r'\bnovel\b', h1, re.IGNORECASE):
+        return 'About the Novel'
+    if re.search(r'\bcontact\b', h1, re.IGNORECASE):
+        return 'Get in Touch'
+    if re.search(r'\bnews\b', h1, re.IGNORECASE):
+        return 'Latest News'
+    if re.search(r'\bstore\b|\bshop\b', h1, re.IGNORECASE):
+        return 'Shop Music and Books'
+    if re.search(r'\bmusic\b|\bdiscograph', h1, re.IGNORECASE):
+        return 'Albums and Music'
+    if re.search(r'\bbio\b|\babout\b', h1, re.IGNORECASE):
+        return 'About the Artist'
+    return ''
+
+
+def fix_thin_content(site_dir: str, langs: list, groq_api_key: str = None) -> None:
+    """
+    Add intro/outro paragraphs to archive pages with thin content (<200 words).
+    Translates the added text for lang versions.
+    """
+    SKIP = set(LANG_DIRS + ARCHIVE_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules'])
+    INTRO_MARKER = 'class="archive-intro"'
+
+    INTRO_EN = ('<p class="archive-intro">{site_name} publishes personal blog posts about music, '
+                'creativity, and daily life. Browse the entries below from this archive period — '
+                'each one a direct, intimate window into the artist\'s thoughts and experiences.</p>')
+    OUTRO_EN = ('<p class="archive-outro">Explore more posts in other archive sections, '
+                'or visit the main blog for the latest updates.</p>')
+
+    pages_added = {}  # rel → (intro_text, outro_text)
+
+    # ── Pass 1: fix root EN archive pages ────────────────────────────────────
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if os.path.basename(d) not in SKIP]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            html = open(fpath, encoding='utf-8', errors='ignore').read()
+
+            if INTRO_MARKER in html:
+                continue  # already patched
+
+            # Only target archive-style pages (H1 contains "Archives:")
+            h1_m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.IGNORECASE | re.DOTALL)
+            h1 = re.sub(r'<[^>]+>', '', h1_m.group(1)).strip() if h1_m else ''
+            if not re.search(r'[Aa]rchives?:', h1):
+                continue
+
+            # Check word count (using same logic as audit)
+            articles = re.findall(r'<article[^>]*>(.*?)</article>', html, re.DOTALL | re.IGNORECASE)
+            word_count = sum(
+                len(re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', a)).strip().split())
+                for a in articles
+            ) if articles else 0
+
+            if word_count >= 200:
+                continue
+
+            # Detect site name from title
+            title_m = re.search(r'<title>([^<]+)</title>', html)
+            title = title_m.group(1).strip() if title_m else ''
+            site_name = re.split(r'\s+[|»:–—]\s+', title)[-1].strip() if title else 'This site'
+
+            intro = INTRO_EN.format(site_name=site_name)
+            outro = OUTRO_EN
+
+            # Insert intro after H1, outro before nav
+            h1_end = re.search(r'</h1>', html, re.IGNORECASE)
+            if not h1_end:
+                continue
+            html = html[:h1_end.end()] + '\n' + intro + html[h1_end.end():]
+
+            nav_m = re.search(r'<nav[^>]*class="[^"]*navigation[^"]*"', html, re.IGNORECASE)
+            if nav_m:
+                html = html[:nav_m.start()] + outro + '\n' + html[nav_m.start():]
+
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(html)
+
+            rel = os.path.relpath(fpath, site_dir)
+            pages_added[rel] = (intro, outro)
+
+    if not pages_added or not groq_api_key:
+        return
+
+    # ── Pass 2: translate to lang versions ───────────────────────────────────
+    unique_intros = list(dict.fromkeys(i for i, _ in pages_added.values()))
+    unique_outros = list(dict.fromkeys(o for _, o in pages_added.values()))
+
+    for lang in langs:
+        lang_dir = os.path.join(site_dir, lang)
+        if not os.path.isdir(lang_dir):
+            continue
+        lang_name = _GROQ_LANG_NAMES.get(lang, lang)
+
+        try:
+            all_texts = unique_intros + unique_outros
+            all_translated = _groq_translate_batch(groq_api_key, all_texts, lang_name)
+            intro_map = dict(zip(unique_intros, all_translated[:len(unique_intros)]))
+            outro_map = dict(zip(unique_outros, all_translated[len(unique_intros):]))
+            time.sleep(1.5)
+        except Exception:
+            continue
+
+        for rel, (en_intro, en_outro) in pages_added.items():
+            lang_fpath = os.path.join(lang_dir, os.path.basename(rel))
+            if not os.path.exists(lang_fpath):
+                continue
+            try:
+                html = open(lang_fpath, encoding='utf-8', errors='ignore').read()
+                if INTRO_MARKER in html:
+                    continue
+                tr_intro = intro_map.get(en_intro, en_intro)
+                tr_outro = outro_map.get(en_outro, en_outro)
+                h1_end = re.search(r'</h1>', html, re.IGNORECASE)
+                if not h1_end:
+                    continue
+                html = html[:h1_end.end()] + '\n' + tr_intro + html[h1_end.end():]
+                nav_m = re.search(r'<nav[^>]*class="[^"]*navigation[^"]*"', html, re.IGNORECASE)
+                if nav_m:
+                    html = html[:nav_m.start()] + tr_outro + '\n' + html[nav_m.start():]
+                with open(lang_fpath, 'w', encoding='utf-8') as f:
+                    f.write(html)
+            except Exception:
+                pass
+
+
+def _groq_call(groq_api_key: str, messages: list, max_tokens: int = 80,
+               temperature: float = 0.7, retries: int = 4) -> str:
+    """Call Groq API with exponential backoff on 429. Uses requests if available."""
+    payload = {
+        'model': 'llama-3.1-8b-instant',
+        'messages': messages,
+        'max_tokens': max_tokens,
+        'temperature': temperature,
+    }
+    headers = {
+        'Authorization': f'Bearer {groq_api_key}',
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0',
+    }
+    url = 'https://api.groq.com/openai/v1/chat/completions'
+    delay = 3
+
+    for attempt in range(retries):
+        try:
+            if _HAS_REQUESTS:
+                r = _requests.post(url, headers=headers, json=payload, timeout=30)
+                if r.status_code == 429:
+                    time.sleep(delay * (2 ** attempt))
+                    continue
+                r.raise_for_status()
+                return r.json()['choices'][0]['message']['content'].strip()
+            else:
+                import urllib.request
+                req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    return json.loads(resp.read())['choices'][0]['message']['content'].strip()
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay * (2 ** attempt))
+    raise RuntimeError('Groq: max retries exceeded')
+
+
+def _groq_translate_batch(groq_api_key: str, texts: list, lang_name: str) -> list:
+    """Translate a list of texts to lang_name in one Groq call. Returns list same length."""
+    numbered = '\n'.join(f'{i+1}. {t}' for i, t in enumerate(texts))
+    system = (f'Translate the following items to {lang_name}. '
+              f'Return ONLY the translations, numbered the same way, one per line. '
+              f'Keep each item under 160 characters. No extra text.')
+    result = _groq_call(groq_api_key,
+                        [{'role': 'system', 'content': system},
+                         {'role': 'user', 'content': numbered}],
+                        max_tokens=4000, temperature=0.1)
+    out = []
+    for line in result.split('\n'):
+        line = re.sub(r'^\d+[.)]\s*', '', line.strip())
+        if line:
+            out.append(line)
+    while len(out) < len(texts):
+        out.append(texts[len(out)])
+    return out[:len(texts)]
+
+
+_GROQ_LANG_NAMES = {
+    'ar': 'Arabic', 'cs': 'Czech', 'de': 'German', 'el': 'Greek',
+    'es': 'Spanish', 'fi': 'Finnish', 'fr': 'French', 'hi': 'Hindi',
+    'it': 'Italian', 'ja': 'Japanese', 'ko': 'Korean', 'nl': 'Dutch',
+    'pl': 'Polish', 'pt': 'Portuguese', 'ro': 'Romanian', 'ru': 'Russian',
+    'sk': 'Slovak', 'sv': 'Swedish', 'tr': 'Turkish', 'uk': 'Ukrainian',
+    'zh': 'Chinese',
+}
+
 
 def _generate_description(html: str, groq_api_key: str) -> str | None:
     """Use Groq to generate a unique 120-155 char page description."""
-    import urllib.request
-
     # Extract page text
     title_m = re.search(r'<title>([^<]+)</title>', html)
     title = title_m.group(1).strip() if title_m else ''
@@ -177,8 +613,7 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
     # Get main content text
     body_m = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
     if body_m:
-        text = re.sub(r'<script[^>]*>.*?</script>', '', body_m.group(1), flags=re.DOTALL)
-        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+        text = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', body_m.group(1), flags=re.DOTALL)
         text = re.sub(r'<[^>]+>', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         text = text[:800]
@@ -188,11 +623,13 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
     if not text or len(text) < 50:
         return None
 
-    # Check if description already exists and is unique enough
+    # Check if description already exists and is good
     desc_m = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content="([^"]+)"', html, re.IGNORECASE)
     existing = desc_m.group(1).strip() if desc_m else ''
+    if existing and 50 <= len(existing) <= 155:
+        return None  # Already fine — skip Groq call
 
-    # Extract main keyword from title (remove site name suffix, drop stop words)
+    # Extract main keyword from title
     title_clean = re.split(r'\s+[|:–—]\s+', title)[0].strip()
     stop = {'the','a','an','in','on','at','for','to','of','and','or','is','are',
             'was','were','this','that','with','from','by','as','its','it','be'}
@@ -204,40 +641,20 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
         f'Requirements:\n'
         f'- Length: 120-155 characters (count carefully)\n'
         f'- Naturally include this keyword: "{main_keyword}"\n'
-        f'- End with a call-to-action (e.g. "Learn more", "Find out", "Discover", "Get started")\n'
+        f'- End with a call-to-action (e.g. "Learn more", "Find out", "Discover")\n'
         f'- No quotes, no markdown, no bullet points — plain text only\n\n'
         f'Page title: {title}\n'
         f'Page content: {text}'
     )
 
-    payload = json.dumps({
-        'model': 'llama-3.1-8b-instant',
-        'messages': [{'role': 'user', 'content': prompt}],
-        'max_tokens': 80,
-        'temperature': 0.7,
-    }).encode()
+    result = _groq_call(groq_api_key, [{'role': 'user', 'content': prompt}],
+                        max_tokens=80, temperature=0.7)
+    result = result.strip('"').strip("'")
 
-    req = urllib.request.Request(
-        'https://api.groq.com/openai/v1/chat/completions',
-        data=payload,
-        headers={
-            'Authorization': f'Bearer {groq_api_key}',
-            'Content-Type': 'application/json',
-            'User-Agent': 'Mozilla/5.0',
-        }
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read())
-
-    result = data['choices'][0]['message']['content'].strip().strip('"').strip("'")
-
-    # Validate: must be different from existing and have some content
     if existing and result.lower()[:50] == existing.lower()[:50]:
         return None
     if len(result) < 50:
         return None
-
-    # Trim to 155 chars at word boundary
     if len(result) > 155:
         result = result[:152].rsplit(' ', 1)[0].rstrip('.,;') + '...'
 

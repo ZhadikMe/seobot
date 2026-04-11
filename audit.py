@@ -152,18 +152,22 @@ def run_audit_on_dir(site_dir: str) -> dict:
 
 
 def _count_words(html: str) -> int:
-    """Count visible words in HTML, preferring <main>/<article> but falling back to <body>."""
-    # Try <main> or <article> first
-    for tag in ('main', 'article'):
-        m = re.search(rf'<{tag}[^>]*>(.*?)</{tag}>', html, re.DOTALL | re.IGNORECASE)
-        if m:
-            return _words_in_html(m.group(1))
+    """Count visible words in HTML, preferring <main> then all <article> blocks, then <body>."""
+    # Try <main> first
+    m = re.search(r'<main[^>]*>(.*?)</main>', html, re.DOTALL | re.IGNORECASE)
+    if m:
+        return _words_in_html(m.group(1))
 
-    # Fallback: full <body> minus script/style
+    # Sum ALL <article> blocks (archive pages have multiple)
+    articles = re.findall(r'<article[^>]*>(.*?)</article>', html, re.DOTALL | re.IGNORECASE)
+    if articles:
+        return sum(_words_in_html(a) for a in articles)
+
+    # Fallback: full <body> minus script/style/nav/footer
     body_m = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
     if body_m:
-        body = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', body_m.group(1),
-                      flags=re.DOTALL | re.IGNORECASE)
+        body = re.sub(r'<(script|style|nav|footer|aside)[^>]*>.*?</(script|style|nav|footer|aside)>',
+                      '', body_m.group(1), flags=re.DOTALL | re.IGNORECASE)
         return _words_in_html(body)
 
     return 0

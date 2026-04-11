@@ -770,6 +770,8 @@ async def run_fixes(message: Message, state: FSMContext):
         ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
         ('📅 Обновляю год в заголовках...', 'fix_title_refresh'),
         ('📝 Генерирую уникальные descriptions...', 'fix_descriptions'),
+        ('🏷️ Добавляю H2 заголовки...', 'fix_h2'),
+        ('📄 Расширяю тонкие страницы...', 'fix_thin_content'),
         ('🗂️ Добавляю Schema.org (BreadcrumbList)...', 'fix_schema'),
         ('🖼️ Добавляю OG images...', 'fix_og_image'),
         ('🚫 Добавляю nofollow на внешние ссылки...', 'fix_nofollow'),
