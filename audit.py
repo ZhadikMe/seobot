@@ -72,10 +72,13 @@ def run_audit_on_dir(site_dir: str) -> dict:
             page_ok = False
         else:
             d = desc_m.group(1).strip()
+            # For CJK scripts each character carries ~2.5x the semantic weight of a Latin char
+            cjk_chars = len(re.findall(r'[\u3040-\u9fff\uac00-\ud7a3\uf900-\ufaff]', d))
+            effective_len = len(d) + int(cjk_chars * 1.5)  # CJK chars count as ~2.5 each
             if len(d) > 160:
                 issues.append(f'⚠️ {rel}: description длинный ({len(d)} симв, норма ≤155)')
                 page_ok = False
-            elif len(d) < 50:
+            elif effective_len < 50:
                 issues.append(f'⚠️ {rel}: description короткий ({len(d)} симв, норма ≥120)')
                 page_ok = False
 
@@ -161,7 +164,21 @@ def _count_words(html: str) -> int:
     # Sum ALL <article> blocks (archive pages have multiple)
     articles = re.findall(r'<article[^>]*>(.*?)</article>', html, re.DOTALL | re.IGNORECASE)
     if articles:
-        return sum(_words_in_html(a) for a in articles)
+        total = sum(_words_in_html(a) for a in articles)
+        # Also count archive-intro/outro paragraphs (outside article tags)
+        extras = re.findall(r'<p[^>]*class="archive-(?:intro|outro)"[^>]*>(.*?)</p>', html, re.DOTALL | re.IGNORECASE)
+        total += sum(_words_in_html(e) for e in extras)
+        # Also count seo-extra divs that landed outside the article (e.g. page expansions)
+        seo_extras = re.findall(r'<div[^>]*class="seo-extra[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL | re.IGNORECASE)
+        for frag in seo_extras:
+            w = _words_in_html(frag)
+            # Only count if this fragment isn't already inside an article (avoid double-counting)
+            frag_pos = html.find(frag)
+            in_article = any(html.find(a_content) <= frag_pos <= html.find(a_content) + len(a_content)
+                             for a_content in articles)
+            if not in_article:
+                total += w
+        return total
 
     # Fallback: full <body> minus script/style/nav/footer
     body_m = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
@@ -176,4 +193,11 @@ def _count_words(html: str) -> int:
 def _words_in_html(fragment: str) -> int:
     text = re.sub(r'<[^>]+>', ' ', fragment)
     text = re.sub(r'\s+', ' ', text).strip()
-    return len(text.split()) if text else 0
+    if not text:
+        return 0
+    # Count CJK characters (Japanese, Chinese, Korean) as individual words
+    cjk_count = len(re.findall(r'[\u3040-\u9fff\uac00-\ud7a3\uf900-\ufaff]', text))
+    if cjk_count:
+        non_cjk = re.sub(r'[\u3040-\u9fff\uac00-\ud7a3\uf900-\ufaff]', '', text)
+        return cjk_count + (len(non_cjk.split()) if non_cjk.strip() else 0)
+    return len(text.split())

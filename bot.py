@@ -766,6 +766,7 @@ async def run_fixes(message: Message, state: FSMContext):
     loop = asyncio.get_event_loop()
 
     SEO_STEPS = [
+        ('🛡️ Удаляю Cloudflare заглушки...', 'fix_cloudflare_stubs'),
         ('🧹 Очищаю archive.org скрипты...', 'fix_archive_scripts'),
         ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
         ('📅 Обновляю год в заголовках...', 'fix_title_refresh'),
@@ -774,7 +775,8 @@ async def run_fixes(message: Message, state: FSMContext):
         ('📄 Расширяю тонкие страницы...', 'fix_thin_content'),
         ('🗂️ Добавляю Schema.org (BreadcrumbList)...', 'fix_schema'),
         ('🖼️ Добавляю OG images...', 'fix_og_image'),
-        ('🚫 Добавляю nofollow на внешние ссылки...', 'fix_nofollow'),
+        ('🐦 Добавляю Twitter Card теги...', 'fix_twitter_card'),
+        ('🔗 Удаляю внешние ссылки...', 'fix_external_links'),
         ('🤖 Генерирую robots.txt...', 'fix_robots_txt'),
     ]
     TRANSLATE_STEPS = [
@@ -913,13 +915,15 @@ async def run_fixes_from_data(chat_id: int, data: dict, mode: str):
     loop = asyncio.get_event_loop()
 
     SEO_STEPS = [
+        ('🛡️ Удаляю Cloudflare заглушки...', 'fix_cloudflare_stubs'),
         ('🧹 Очищаю archive.org скрипты...', 'fix_archive_scripts'),
         ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
         ('📅 Обновляю год в заголовках...', 'fix_title_refresh'),
         ('📝 Генерирую descriptions...', 'fix_descriptions'),
         ('🗂️ Добавляю Schema.org...', 'fix_schema'),
         ('🖼️ Добавляю OG images...', 'fix_og_image'),
-        ('🚫 Добавляю nofollow...', 'fix_nofollow'),
+        ('🐦 Добавляю Twitter Card теги...', 'fix_twitter_card'),
+        ('🔗 Удаляю внешние ссылки...', 'fix_external_links'),
         ('🤖 Генерирую robots.txt...', 'fix_robots_txt'),
     ]
     TRANSLATE_STEPS = [

@@ -41,6 +41,12 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
             fix_canonical(site_dir, site_domain)
         elif step_key == 'fix_og_image':
             fix_og_image(site_dir, site_domain)
+        elif step_key == 'fix_twitter_card':
+            fix_twitter_card(site_dir)
+        elif step_key == 'fix_cloudflare_stubs':
+            fix_cloudflare_stubs(site_dir)
+        elif step_key == 'fix_external_links':
+            fix_external_links(site_dir, site_domain)
         elif step_key == 'fix_nofollow':
             fix_nofollow(site_dir)
         elif step_key == 'fix_robots_txt':
@@ -868,8 +874,98 @@ def _find_fallback_og_image(site_dir: str, base_url: str) -> str | None:
     return None
 
 
-def fix_nofollow(site_dir: str):
-    """Add rel="nofollow noopener noreferrer" to all external links."""
+def fix_twitter_card(site_dir: str):
+    """
+    Add twitter:card/title/description/image meta tags if missing.
+    Copies values from existing og:* tags.
+    """
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + LANG_DIRS + ARCHIVE_DIRS]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            with open(fpath, encoding='utf-8', errors='ignore') as f:
+                html = f.read()
+
+            if 'twitter:card' in html:
+                continue
+
+            head_close = html.find('</head>')
+            if head_close < 0:
+                continue
+
+            def _og(prop):
+                m = re.search(
+                    r'<meta[^>]*property=["\']og:' + prop + r'["\'][^>]*content=["\']([^"\']*)["\']',
+                    html, re.IGNORECASE
+                )
+                return m.group(1).strip() if m else None
+
+            title = _og('title')
+            desc  = _og('description')
+            image = _og('image')
+
+            if not title and not desc:
+                continue
+
+            tags = ['<meta name="twitter:card" content="summary_large_image">']
+            if title:
+                tags.append(f'<meta name="twitter:title" content="{title}">')
+            if desc:
+                tags.append(f'<meta name="twitter:description" content="{desc}">')
+            if image:
+                tags.append(f'<meta name="twitter:image" content="{image}">')
+
+            inject = '\n'.join(tags) + '\n'
+            html = html[:head_close] + inject + html[head_close:]
+
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(html)
+
+
+def fix_cloudflare_stubs(site_dir: str):
+    """
+    Delete HTML files that are Cloudflare challenge/waiting-room stubs.
+    Detected by: 'window.location.reload()' or 'One moment, please' in content.
+    The file is removed so the pipeline doesn't process a stub instead of real content.
+    """
+    STUB_PATTERNS = [
+        r'window\.location\.reload\(\)',
+        r'One moment,\s*please',
+        r'Please wait while your request is being verified',
+        r'Checking your browser before accessing',
+        r'DDoS protection by\s+Cloudflare',
+        r'Ray ID:.*Cloudflare',
+    ]
+
+    removed = 0
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            with open(fpath, encoding='utf-8', errors='ignore') as f:
+                html = f.read()
+
+            for pattern in STUB_PATTERNS:
+                if re.search(pattern, html, re.IGNORECASE):
+                    os.remove(fpath)
+                    removed += 1
+                    break
+
+    return removed
+
+
+def fix_external_links(site_dir: str, site_domain: str = None):
+    """
+    Remove external links from all HTML pages.
+    - <a href="https://...">text</a>  →  text  (strip tag, keep anchor text)
+    - <a href="https://..."><img...></a>  →  <img...>  (strip tag, keep img)
+    - mailto: / tel: links are left untouched
+    - Links to site_domain are left untouched
+    """
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
         for fname in files:
@@ -881,32 +977,41 @@ def fix_nofollow(site_dir: str):
 
             original = html
 
-            def add_nofollow(m):
-                tag = m.group(0)
-                href_m = re.search(r'href=["\']([^"\']+)["\']', tag)
-                if not href_m:
-                    return tag
-                href = href_m.group(1)
-                if not href.startswith('http'):
-                    return tag
-                # Already has rel
-                if re.search(r'\brel=', tag):
-                    # Add nofollow if not already there
-                    if 'nofollow' not in tag:
-                        tag = re.sub(
-                            r'(rel=["\'])([^"\']*?)(["\'])',
-                            lambda r: r.group(1) + r.group(2).strip() + ' nofollow noopener noreferrer' + r.group(3),
-                            tag
-                        )
-                    return tag
-                # No rel — add it
-                return tag.rstrip('>').rstrip('/').rstrip() + ' rel="nofollow noopener noreferrer">'
+            def strip_external(m):
+                full = m.group(0)   # entire <a ...>...</a>
+                open_tag = m.group(1)
+                inner = m.group(2)
 
-            html = re.sub(r'<a\s[^>]+>', add_nofollow, html)
+                href_m = re.search(r'href=["\']([^"\']*)["\']', open_tag)
+                if not href_m:
+                    return full
+                href = href_m.group(1)
+
+                # Leave internal, mailto, tel untouched
+                if not href.startswith('http'):
+                    return full
+                # Leave own domain untouched
+                if site_domain and site_domain.lower() in href.lower():
+                    return full
+
+                # Return just the inner content (text or img)
+                return inner.strip()
+
+            html = re.sub(
+                r'(<a\s[^>]*>)(.*?)</a>',
+                strip_external,
+                html,
+                flags=re.DOTALL | re.IGNORECASE
+            )
 
             if html != original:
                 with open(fpath, 'w', encoding='utf-8') as f:
                     f.write(html)
+
+
+def fix_nofollow(site_dir: str):
+    """Deprecated: use fix_external_links instead."""
+    fix_external_links(site_dir)
 
 
 def fix_robots_txt(site_dir: str, site_domain: str = None):
