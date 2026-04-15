@@ -780,6 +780,7 @@ async def run_fixes(message: Message, state: FSMContext):
         ('🐦 Добавляю Twitter Card теги...', 'fix_twitter_card'),
         ('🔗 Удаляю внешние ссылки...', 'fix_external_links'),
         ('🤖 Генерирую robots.txt...', 'fix_robots_txt'),
+        ('🗺️ Генерирую sitemap.xml...', 'fix_sitemap'),
     ]
     TRANSLATE_STEPS = [
         ('🌍 Запускаю переводы...', 'fix_translations'),
@@ -928,6 +929,7 @@ async def run_fixes_from_data(chat_id: int, data: dict, mode: str):
         ('🐦 Добавляю Twitter Card теги...', 'fix_twitter_card'),
         ('🔗 Удаляю внешние ссылки...', 'fix_external_links'),
         ('🤖 Генерирую robots.txt...', 'fix_robots_txt'),
+        ('🗺️ Генерирую sitemap.xml...', 'fix_sitemap'),
     ]
     TRANSLATE_STEPS = [
         ('🌍 Запускаю переводы...', 'fix_translations'),
