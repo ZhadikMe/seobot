@@ -112,7 +112,7 @@ def fix_archive_scripts(site_dir: str):
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
         for fname in files:
-            if not fname.endswith('.html'):
+            if not fname.endswith(('.html', '.css')):
                 continue
             fpath = os.path.join(root, fname)
             with open(fpath, encoding='utf-8', errors='ignore') as f:
@@ -120,21 +120,31 @@ def fix_archive_scripts(site_dir: str):
 
             original = html
 
-            # Remove control characters from all HTML files
-            html = _CONTROL_RE.sub('', html)
+            if fname.endswith('.html'):
+                # Remove control characters from HTML files
+                html = _CONTROL_RE.sub('', html)
 
-            # Remove orphan </script> tags: two consecutive </script> with only
-            # whitespace between them — the second one has no matching opening tag
-            html = re.sub(r'</script>(\s*\n\s*)</script>', r'</script>\1', html)
+                # Remove orphan </script> tags
+                html = re.sub(r'</script>(\s*\n\s*)</script>', r'</script>\1', html)
 
-            if 'archive.org' in html:
-                for pattern in ARCHIVE_SCRIPT_PATTERNS:
-                    html = re.sub(pattern, '', html, flags=re.DOTALL | re.IGNORECASE)
+                if 'archive.org' in html:
+                    for pattern in ARCHIVE_SCRIPT_PATTERNS:
+                        html = re.sub(pattern, '', html, flags=re.DOTALL | re.IGNORECASE)
 
-                # Also fix archive URLs left in href/src attributes
+                    # /web/TIMESTAMP.../https://domain/path → https://domain/path
+                    html = re.sub(
+                        r'(?:https?://web\.archive\.org)?/web/\d{14}[a-z_]*/https?://([^\s"\'<>]+)',
+                        lambda m: 'https://' + m.group(1),
+                        html
+                    )
+
+            # Fix archive URLs in both HTML and CSS:
+            # Pattern: /web/20180820183224im_//images/foo.jpg → /images/foo.jpg
+            # (no domain — used in CSS url() and some inline styles)
+            if re.search(r'/web/\d{14}[a-z_]*/', html):
                 html = re.sub(
-                    r'(?:https?://web\.archive\.org)?/web/\d{14}[a-z_]*/https?://([^\s"\'<>]+)',
-                    lambda m: 'https://' + m.group(1),
+                    r'(?:https?://web\.archive\.org)?/web/\d{14}[a-z_]*/+(?:https?://[^/\s"\'<>()]+/)?',
+                    '/',
                     html
                 )
 

@@ -13,8 +13,11 @@ Examples:
 import os
 import re
 import sys
+import json
 import shutil
 import subprocess
+import urllib.request
+import urllib.error
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -90,13 +93,39 @@ def parse_archive_url(archive_url: str) -> tuple[str, str, str]:
 
 
 # ---------------------------------------------------------------------------
+# CDX estimate
+# ---------------------------------------------------------------------------
+
+def _cdx_estimate(domain: str, timestamp: str) -> int:
+    """
+    Query archive.org CDX API to count unique URLs for this domain in the snapshot year.
+    Returns file count, or 0 on failure.
+    """
+    year = timestamp[:4]
+    cdx_url = (
+        f'https://web.archive.org/cdx/search/cdx'
+        f'?url={domain}/*&output=json&fl=urlkey'
+        f'&collapse=urlkey&matchType=domain'
+        f'&from={year}0101&to={year}1231&limit=2000'
+    )
+    try:
+        req = urllib.request.Request(cdx_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        return max(len(data) - 1, 0)  # subtract header row
+    except Exception:
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # wget download
 # ---------------------------------------------------------------------------
 
-def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_host: str) -> None:
+def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_host: str,
+                      total_estimated: int = 0) -> None:
     """
     Run wget to mirror the snapshot into tmp_dir.
-    Both www and non-www variants are allowed so assets resolve correctly.
+    Streams wget output line-by-line to show live download progress.
     """
     domains = f'{domain_no_www},www.{domain_no_www},web.archive.org'
 
@@ -107,24 +136,41 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         '--page-requisites',
         '--no-convert-links',   # keep original archive.org URLs; fix_archive_scripts cleans them
         '--span-hosts',
-        '--no-parent',
         f'--domains={domains}',
-        '--timeout=15',
+        '--timeout=30',
         '--tries=3',
-        '--wait=1',
-        '--random-wait',
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         '-e', 'robots=off',
         f'--directory-prefix={tmp_dir}',
         archive_url,
     ]
 
-    print(f'Running wget for {wget_host} ...')
-    print('  ' + ' '.join(cmd[:6]) + ' ...')
-    result = subprocess.run(cmd)
+    if total_estimated:
+        est_min = max(1, round(total_estimated * 10 / 60))
+        print(f'Скачиваем {wget_host} (~{total_estimated} файлов, ~{est_min} мин)...')
+    else:
+        print(f'Скачиваем {wget_host}...')
+
+    saved_re = re.compile(r'saved \[')
+    count = 0
+
+    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True,
+                            encoding='utf-8', errors='replace')
+    for line in proc.stderr:
+        if saved_re.search(line):
+            count += 1
+            if total_estimated:
+                pct = min(count * 100 // total_estimated, 99)
+                print(f'\r  Скачано: {count}/{total_estimated} [{pct}%]',
+                      end='', flush=True)
+            else:
+                print(f'\r  Скачано: {count} файлов', end='', flush=True)
+    proc.wait()
+    print(f'\r  Скачано: {count} файлов — готово.           ')
+
     # wget exits non-zero on partial downloads — that's normal, don't raise
-    if result.returncode not in (0, 8):
-        print(f'[warn] wget exited with code {result.returncode} (usually fine)')
+    if proc.returncode not in (0, 8):
+        print(f'[warn] wget завершился с кодом {proc.returncode} (обычно не критично)')
 
 
 # ---------------------------------------------------------------------------
@@ -197,53 +243,63 @@ def find_site_root(tmp_dir: str, timestamp: str, domain_no_www: str, wget_host: 
 # Extract: copy site root → target dir
 # ---------------------------------------------------------------------------
 
-def _copy_tree(src_dir: str, dst_dir: str) -> int:
-    """Recursively copy src_dir into dst_dir, merging contents. Returns file count."""
+def _copy_tree_dedup(src_dir: str, dst_dir: str, seen: set, rel_prefix: str = '') -> int:
+    """Recursively copy src_dir into dst_dir, skipping already-seen relative paths."""
     os.makedirs(dst_dir, exist_ok=True)
     count = 0
     for item in os.listdir(src_dir):
         src = os.path.join(src_dir, item)
         dst = os.path.join(dst_dir, item)
+        rel = (rel_prefix + '/' + item).lstrip('/')
         if os.path.isdir(src):
-            count += _copy_tree(src, dst)
+            count += _copy_tree_dedup(src, dst, seen, rel)
         else:
-            shutil.copy2(src, dst)
-            count += 1
+            if rel not in seen:
+                shutil.copy2(src, dst)
+                seen.add(rel)
+                count += 1
     return count
 
 
 def extract_site(site_root: str, target_dir: str) -> None:
     """
-    Copy all site files into target_dir.
-    wget splits assets into sibling dirs: ts/http%3A/domain/ for HTML,
-    tscs_/http%3A/domain/ for CSS, tsjs_/ for JS, tsim_/ for images.
-    We collect all of them.
+    Copy all domain files into target_dir from ALL timestamp directories.
+    wget follows redirects across timestamps, so assets may land in directories
+    with different timestamps than the starting snapshot. We scan every ts-dir
+    under web.archive.org/web/ and collect anything belonging to our domain.
+    HTML files from the main timestamp take priority over duplicates.
     """
     os.makedirs(target_dir, exist_ok=True)
 
-    # site_root is e.g. .../web/20180330095801/http%3A/elizaroseandcompany.com
-    # sibling asset dirs are at the same depth with suffix: cs_, js_, im_, wd_, fw_, etc.
-    archive_web = os.path.dirname(os.path.dirname(os.path.dirname(site_root)))  # .../web.archive.org/web
-    ts_dir_name = os.path.basename(os.path.dirname(os.path.dirname(site_root)))  # e.g. 20180330095801
-    # Strip numeric-only timestamp to get base
+    # archive_web is the .../web.archive.org/web/ directory
+    archive_web = os.path.dirname(os.path.dirname(os.path.dirname(site_root)))
+    domain_basename = os.path.basename(site_root)  # e.g. elizaroseandcompany.com
+
+    # Collect all ts-dirs sorted: main timestamp first (so HTML pages take priority),
+    # then all others. This ensures original pages win over redirected duplicates.
+    ts_dir_name = os.path.basename(os.path.dirname(os.path.dirname(site_root)))
     ts_base = re.match(r'(\d+)', ts_dir_name).group(1)
 
+    all_entries = sorted(os.listdir(archive_web))
+    # Put main timestamp entries first
+    main_entries = [e for e in all_entries if e.startswith(ts_base)]
+    other_entries = [e for e in all_entries if not e.startswith(ts_base)]
+    ordered_entries = main_entries + other_entries
+
+    seen_files: set[str] = set()  # relative paths already copied (skip duplicates)
     total = 0
-    for entry in os.listdir(archive_web):
-        # Match timestamp-based dirs: 20180330095801, 20180330095801cs_, etc.
-        if not entry.startswith(ts_base):
-            continue
+
+    for entry in ordered_entries:
         entry_path = os.path.join(archive_web, entry)
         if not os.path.isdir(entry_path):
             continue
-        # Find the domain subdirectory within this asset dir
-        # Structure: tsXX_/http%3A/domain/ or tsXX_/domain/
-        domain_subdir = _find_domain_subdir(entry_path, os.path.basename(site_root))
-        if domain_subdir and os.path.isdir(domain_subdir):
-            n = _copy_tree(domain_subdir, target_dir)
+        domain_subdir = _find_domain_subdir(entry_path, domain_basename)
+        if not domain_subdir or not os.path.isdir(domain_subdir):
+            continue
+        n = _copy_tree_dedup(domain_subdir, target_dir, seen_files)
+        if n:
             total += n
-            suffix = entry[len(ts_base):] or '(html)'
-            print(f'  Copied {n} files from {suffix} assets')
+            print(f'  Copied {n} files from ts-dir: {entry}')
 
     print(f'Extracted {total} total files to: {target_dir}')
 
@@ -321,6 +377,109 @@ def rename_php_to_html(site_dir: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Post-download: recover assets missing from the wget run
+# ---------------------------------------------------------------------------
+
+def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -> None:
+    """
+    Scan all HTML files in site_dir for referenced assets (img/link/script).
+    Download any missing files directly from archive.org using appropriate
+    timestamp modifiers (im_ for images, cs_ for CSS, js_ for JS).
+    """
+    missing: set[str] = set()
+
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git']]
+        for fname in files:
+            if not fname.lower().endswith(('.html', '.php')):
+                continue
+            fpath = os.path.join(root, fname)
+            with open(fpath, encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+
+            for m in re.finditer(
+                r'(?:src|href|data-src)=["\']([^"\'#\s][^"\']*)["\']',
+                content, re.IGNORECASE
+            ):
+                path = m.group(1).strip()
+                # Skip external URLs, anchors, mailto, javascript, data URIs
+                if re.match(r'^(?:https?://|//|#|javascript:|data:|mailto:)', path, re.I):
+                    continue
+                # Skip un-cleaned archive.org paths (fix_archive_scripts handles these)
+                if re.match(r'^/web/\d{14}', path):
+                    continue
+                # Only care about static assets (images, css, js, fonts)
+                ext = os.path.splitext(path.split('?')[0])[1].lower()
+                if ext not in ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.ico',
+                               '.webp', '.css', '.js', '.woff', '.woff2', '.ttf', '.eot'):
+                    continue
+
+                # Resolve to an absolute root-relative path
+                if path.startswith('/'):
+                    abs_path = path.split('?')[0].split('@')[0]
+                else:
+                    rel_root = os.path.relpath(root, site_dir).replace('\\', '/')
+                    combined = (rel_root + '/' + path) if rel_root != '.' else path
+                    abs_path = '/' + combined.split('?')[0].split('@')[0].lstrip('/')
+
+                local_path = os.path.join(site_dir, abs_path.lstrip('/').replace('/', os.sep))
+                if not os.path.exists(local_path):
+                    missing.add(abs_path)
+
+    if not missing:
+        print('  No missing assets detected.')
+        return
+
+    print(f'  Found {len(missing)} missing assets — downloading from archive.org...')
+
+    # Timestamp modifier order per file type
+    def _ts_order(path: str) -> list[str]:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.ico', '.webp', '.woff', '.woff2', '.ttf', '.eot'):
+            return [timestamp + 'im_', timestamp]
+        if ext == '.css':
+            return [timestamp + 'cs_', timestamp]
+        if ext == '.js':
+            return [timestamp + 'js_', timestamp]
+        return [timestamp]
+
+    recovered = 0
+    failed: list[str] = []
+
+    for abs_path in sorted(missing):
+        local_path = os.path.join(site_dir, abs_path.lstrip('/').replace('/', os.sep))
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+        downloaded = False
+        for ts in _ts_order(abs_path):
+            url = f'https://web.archive.org/web/{ts}/http://{domain_no_www}{abs_path}'
+            try:
+                req = urllib.request.Request(
+                    url, headers={'User-Agent': 'Mozilla/5.0 (compatible)'}
+                )
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    data = resp.read()
+                with open(local_path, 'wb') as f:
+                    f.write(data)
+                recovered += 1
+                downloaded = True
+                break
+            except Exception:
+                continue
+
+        if not downloaded:
+            failed.append(abs_path)
+
+    print(f'  Recovered {recovered}/{len(missing)} missing assets.')
+    if failed:
+        print(f'  Still missing ({len(failed)}):')
+        for p in failed[:20]:
+            print(f'    {p}')
+        if len(failed) > 20:
+            print(f'    ... and {len(failed) - 20} more')
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -339,10 +498,19 @@ def pull_snapshot(archive_url: str, target_dir: str) -> str:
 
     tmp_dir = target_dir.rstrip('/\\') + '_wget_tmp'
 
-    # 1. Download
-    download_snapshot(archive_url, tmp_dir, domain_no_www, wget_host)
+    # 1. CDX estimate (best-effort — used only for progress display)
+    print('Запрашиваем CDX для оценки размера сайта...')
+    total_estimated = _cdx_estimate(domain_no_www, timestamp)
+    if total_estimated:
+        est_min = max(1, round(total_estimated * 10 / 60))
+        print(f'CDX: ~{total_estimated} уникальных URL, ожидаемое время ~{est_min} мин\n')
+    else:
+        print('CDX недоступен — прогресс без оценки\n')
 
-    # 2. Find downloaded root
+    # 2. Download
+    download_snapshot(archive_url, tmp_dir, domain_no_www, wget_host, total_estimated)
+
+    # 3. Find downloaded root
     try:
         site_root = find_site_root(tmp_dir, timestamp, domain_no_www, wget_host)
     except FileNotFoundError as e:
@@ -357,7 +525,7 @@ def pull_snapshot(archive_url: str, target_dir: str) -> str:
     shutil.rmtree(tmp_dir, ignore_errors=True)
     print(f'Cleaned up tmp dir: {tmp_dir}')
 
-    # 4. PHP → HTML (only if .php files exist)
+    # 5. PHP → HTML (only if .php files exist)
     php_files = [
         f for root, _, files in os.walk(target_dir)
         for f in files if f.lower().endswith('.php')
@@ -366,7 +534,12 @@ def pull_snapshot(archive_url: str, target_dir: str) -> str:
         print(f'\nDetected PHP site ({len(php_files)} .php files) — converting...')
         rename_php_to_html(target_dir)
 
-    # 5. Clean archive.org scripts/toolbar/URLs from HTML
+    # 6. Rename files with wget @param suffix → strip params (e.g. main.css@v=1 → main.css)
+    #    MUST run before fix_archive_scripts so .css files are named correctly when processed
+    print('\nFixing wget @param filenames...')
+    _fix_wget_param_filenames(target_dir, domain_no_www)
+
+    # 7. Clean archive.org scripts/toolbar/URLs from HTML/CSS
     print('\nCleaning archive.org artifacts...')
     try:
         import sys as _sys
@@ -377,14 +550,13 @@ def pull_snapshot(archive_url: str, target_dir: str) -> str:
     except ImportError:
         print('[warn] fixes.py not found — skipping archive cleanup')
 
-    # 6. Rename files with wget @param suffix → strip params (e.g. main.css@v=1 → main.css)
-    #    and fix references in HTML/CSS
-    print('\nFixing wget @param filenames...')
-    _fix_wget_param_filenames(target_dir, domain_no_www)
-
-    # 7. Convert absolute domain URLs → relative paths in HTML/CSS
+    # 8. Convert absolute domain URLs → relative paths in HTML/CSS
     print('Converting absolute URLs to relative...')
     _fix_absolute_to_relative(target_dir, domain_no_www)
+
+    # 9. Recover any assets still missing after all cleanups
+    print('\nChecking for missing assets...')
+    _recover_missing_assets(target_dir, domain_no_www, timestamp)
 
     print(f'\n✅ Done: {target_dir}')
     return target_dir
