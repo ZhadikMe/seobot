@@ -69,6 +69,7 @@ class SEOFlow(StatesGroup):
     waiting_archive_url  = State()
     waiting_mode         = State()
     waiting_domain       = State()
+    waiting_target_repo  = State()   # archive flow: where to push results
     waiting_github_token = State()
     waiting_langs        = State()
     waiting_confirm      = State()
@@ -330,13 +331,33 @@ async def cmd_cancel(message: Message, state: FSMContext):
         await message.answer('Что хочешь сделать?', reply_markup=mode_keyboard())
         await state.set_state(SEOFlow.waiting_mode)
 
-    elif current_state == SEOFlow.waiting_github_token:
+    elif current_state == SEOFlow.waiting_target_repo:
         # Back to: domain input
         await message.answer(
             '🌐 *Укажи домен сайта* (или Пропустить):',
             parse_mode='Markdown', reply_markup=domain_keyboard()
         )
         await state.set_state(SEOFlow.waiting_domain)
+
+    elif current_state == SEOFlow.waiting_github_token:
+        data = await state.get_data()
+        if data.get('source') == 'archive':
+            # Back to: target repo input
+            await message.answer(
+                '📤 *Куда пушить результат?*\n\n'
+                'Отправь ссылку на GitHub репозиторий или нажми Пропустить:',
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text='⏭️ Пропустить', callback_data='target_repo:skip')
+                ]])
+            )
+            await state.set_state(SEOFlow.waiting_target_repo)
+        else:
+            await message.answer(
+                '🌐 *Укажи домен сайта* (или Пропустить):',
+                parse_mode='Markdown', reply_markup=domain_keyboard()
+            )
+            await state.set_state(SEOFlow.waiting_domain)
 
     elif current_state == SEOFlow.waiting_langs:
         # Back to: token input (full/translate_only) or domain (audit)
@@ -478,17 +499,18 @@ async def _after_domain(message_or_callback, state: FSMContext):
     mode = data.get('mode', 'audit')
     source = data.get('source', 'github')
 
-    # Archive flow: skip token step, go straight to langs (or confirm for seo_only)
+    # Archive flow: ask for target GitHub repo before langs
     if source == 'archive':
-        if mode == 'seo_only':
-            await state.update_data(selected_langs=set())
-            await _show_archive_confirm(message_or_callback, state)
-        else:
-            await message_or_callback.answer(
-                '🌍 Выбери языки для перевода:',
-                reply_markup=langs_choice_keyboard()
-            )
-            await state.set_state(SEOFlow.waiting_langs)
+        await message_or_callback.answer(
+            '📤 *Куда пушить результат?*\n\n'
+            'Отправь ссылку на GitHub репозиторий:\n`https://github.com/user/repo`\n\n'
+            '_Если репо ещё нет — нажми Пропустить (PR не создастся)_',
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text='⏭️ Пропустить', callback_data='target_repo:skip')
+            ]])
+        )
+        await state.set_state(SEOFlow.waiting_target_repo)
         return
 
     if mode == 'audit':
@@ -531,6 +553,51 @@ async def skip_domain(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+async def _after_target_repo(message, state: FSMContext):
+    """Continue archive flow after target repo step."""
+    data = await state.get_data()
+    mode = data.get('mode', 'full')
+    has_repo = bool(data.get('target_repo_slug'))
+
+    if has_repo:
+        await message.answer(
+            '🔑 *Нужен GitHub токен* для создания PR.\n\n' + _TOKEN_PROMPT,
+            parse_mode='Markdown',
+            reply_markup=token_keyboard()
+        )
+        await state.set_state(SEOFlow.waiting_github_token)
+    elif mode == 'seo_only':
+        await state.update_data(selected_langs=set())
+        await _show_archive_confirm(message, state)
+    else:
+        await message.answer('🌍 Выбери языки для перевода:', reply_markup=langs_choice_keyboard())
+        await state.set_state(SEOFlow.waiting_langs)
+
+
+@dp.message(SEOFlow.waiting_target_repo)
+async def got_target_repo(message: Message, state: FSMContext):
+    url = message.text.strip().rstrip('/')
+    m = re.match(r'https?://github\.com/([^/]+/[^/]+?)(?:\.git)?$', url)
+    if not m:
+        await message.answer(
+            '⚠️ Не похоже на GitHub ссылку.\n`https://github.com/user/repo`',
+            parse_mode='Markdown'
+        )
+        return
+    repo_slug = m.group(1)
+    await state.update_data(target_repo_slug=repo_slug, target_repo_url=url)
+    await message.answer(f'✅ Репозиторий: `{repo_slug}`', parse_mode='Markdown')
+    await _after_target_repo(message, state)
+
+
+@dp.callback_query(SEOFlow.waiting_target_repo, F.data == 'target_repo:skip')
+async def skip_target_repo(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.update_data(target_repo_slug=None)
+    await _after_target_repo(callback.message, state)
+    await callback.answer()
+
+
 @dp.message(SEOFlow.waiting_github_token)
 async def got_github_token(message: Message, state: FSMContext):
     token = message.text.strip() if message.text else ''
@@ -552,8 +619,19 @@ async def got_github_token(message: Message, state: FSMContext):
     await state.update_data(user_github_token=token)
     data = await state.get_data()
     mode = data.get('mode', 'full')
+    source = data.get('source', 'github')
 
-    if mode == 'seo_only':
+    if source == 'archive':
+        if mode == 'seo_only':
+            await state.update_data(selected_langs=set())
+            await _show_archive_confirm(message, state)
+        else:
+            await message.answer(
+                '✅ Токен принят.\n\n🌍 Выбери языки для перевода:',
+                reply_markup=langs_choice_keyboard()
+            )
+            await state.set_state(SEOFlow.waiting_langs)
+    elif mode == 'seo_only':
         # No language selection needed — run audit + confirm directly
         await state.update_data(selected_langs=set())
         await run_audit(message, state)
@@ -599,11 +677,15 @@ async def _show_archive_confirm(message_or_callback, state: FSMContext):
     }
     lang_str = ', '.join(l.upper() for l in langs) if langs else '—'
 
+    target_repo = data.get('target_repo_slug')
+    repo_line = f'📤 PR → `{target_repo}`\n' if target_repo else '📤 PR: не создастся (репо не указан)\n'
+
     await message_or_callback.answer(
         f'📋 *Подтверждение:*\n\n'
         f'🌐 `{domain}`\n'
         f'⚙️ {mode_labels.get(mode, mode)}\n'
         f'🌍 Языки: {lang_str}\n'
+        f'{repo_line}'
         f'⏱ {time_str}',
         parse_mode='Markdown',
         reply_markup=confirm_keyboard()
@@ -1034,12 +1116,32 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
     delta_text = _build_delta_text(audit_before, audit_after)
     log.info(f'[archive] audit after: {audit_after["failed"]}/{audit_after["total"]} failed')
 
+    # ── Create PR if target repo was provided ─────────────────────────────────
+    target_repo   = data.get('target_repo_slug')
+    effective_tok = data.get('user_github_token') or GITHUB_TOKEN
+
+    if target_repo and effective_tok:
+        await bot.edit_message_text(
+            text='🚀 Создаю Pull Request...', chat_id=_chat_id, message_id=_msg_id
+        )
+        log.info(f'[archive] Creating PR → {target_repo}')
+        pr_url = await create_pull_request(tmp_dir, site_dir, target_repo, langs, {}, effective_tok)
+    else:
+        pr_url = None
+
     # ── Done ──────────────────────────────────────────────────────────────────
+    if pr_url:
+        result_text = (f'✅ *Готово!*\n\nPull Request создан:\n{pr_url}\n\n'
+                       f'Проверь изменения и нажми Merge.' + delta_text)
+    elif target_repo:
+        result_text = (f'✅ *SEO применены.*\n\n'
+                       f'❌ PR не создан — ошибка GitHub API.' + delta_text)
+    else:
+        result_text = (f'✅ *SEO применены.*\n\n'
+                       f'ℹ️ PR не создан — репозиторий не был указан.' + delta_text)
+
     await bot.edit_message_text(
-        text=(f'✅ *Готово!*\n\n'
-              f'🌐 Сайт обработан: `{archive_domain}`\n'
-              f'📂 SEO-исправления применены.' + delta_text),
-        chat_id=_chat_id, message_id=_msg_id, parse_mode='Markdown'
+        text=result_text, chat_id=_chat_id, message_id=_msg_id, parse_mode='Markdown'
     )
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
