@@ -59,7 +59,14 @@ def _find_wget() -> str:
     )
 
 
-WGET = _find_wget()
+_WGET: str | None = None  # resolved lazily on first download
+
+
+def _get_wget() -> str:
+    global _WGET
+    if _WGET is None:
+        _WGET = _find_wget()
+    return _WGET
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +138,7 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
     domains = f'{domain_no_www},www.{domain_no_www},web.archive.org'
 
     cmd = [
-        WGET,
+        _get_wget(),
         '--recursive',
         '--level=inf',
         '--page-requisites',
