@@ -106,23 +106,33 @@ def parse_archive_url(archive_url: str) -> tuple[str, str, str]:
 
 def _cdx_estimate(domain: str, timestamp: str) -> int:
     """
-    Query archive.org CDX API to count unique URLs for this domain.
-    No date filter — total unique URL count is a good proxy for site size
-    regardless of which snapshot year we're downloading.
+    Query archive.org CDX API to count unique URLs for this domain snapshot.
+    First tries with ±1 year date filter around the snapshot timestamp;
+    falls back to no date filter if that returns 0.
     Returns file count, or 0 on failure.
     """
-    cdx_url = (
-        f'https://web.archive.org/cdx/search/cdx'
-        f'?url={domain}/*&output=json&fl=urlkey'
-        f'&collapse=urlkey&limit=2000'
-    )
-    try:
-        req = urllib.request.Request(cdx_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-        return max(len(data) - 1, 0)  # subtract header row
-    except Exception:
-        return 0
+    year = int(timestamp[:4]) if timestamp else 0
+
+    def _query(extra: str = '') -> int:
+        cdx_url = (
+            f'https://web.archive.org/cdx/search/cdx'
+            f'?url={domain}/*&output=json&fl=urlkey'
+            f'&collapse=urlkey&limit=2000{extra}'
+        )
+        try:
+            req = urllib.request.Request(cdx_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            return max(len(data) - 1, 0)
+        except Exception:
+            return 0
+
+    if year:
+        count = _query(f'&from={year - 1}&to={year + 1}')
+        if count > 0:
+            return count
+
+    return _query()  # fallback: all-time
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +167,7 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
     # Time limit: CDX estimate * 10 sec/file * 1.2 buffer, min 30 min, max 3 hours
     if total_estimated:
         est_min = max(1, round(total_estimated * 10 / 60))
-        limit_sec = max(1800, int(total_estimated * 10 * 1.2))
+        limit_sec = max(1800, int(total_estimated * 10 * 1.5))
         limit_min = round(limit_sec / 60)
         print(f'Скачиваем {wget_host} (~{total_estimated} файлов, ~{est_min} мин, лимит {limit_min} мин)...')
     else:
