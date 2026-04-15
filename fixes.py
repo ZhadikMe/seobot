@@ -301,6 +301,43 @@ def fix_lang_descriptions(site_dir: str, langs: list, groq_api_key: str,
                 pass
 
 
+def _find_content_insert_point(html: str) -> int | None:
+    """
+    Find the character position right after the opening tag of the main content area.
+    Tries semantic and id/class-based markers, then falls back to after </header> or </nav>.
+    Returns None if no suitable point found.
+    """
+    # Priority order: semantic tags first, then common id/class patterns (no closing > needed)
+    MARKERS = [
+        '<main',
+        '<article',
+        '<div class="entry-content"',
+        '<div class="page-content"',
+        '<div class="post-content"',
+        '<div class="site-content"',
+        '<div id="content"',
+        '<div id="main"',
+        '<div id="main-content"',
+        '<div class="content"',
+        '<div class="main"',
+        '<div class="container"',
+        '<div id="wrapper"',
+        '<section',
+    ]
+    for marker in MARKERS:
+        pos = html.find(marker)
+        if pos >= 0:
+            return html.find('>', pos) + 1
+
+    # Fallback: insert after </header> or </nav>
+    for end_tag in ('</header>', '</nav>'):
+        pos = html.find(end_tag)
+        if pos >= 0:
+            return pos + len(end_tag)
+
+    return None
+
+
 def fix_h1(site_dir: str, langs: list, groq_api_key: str = None) -> None:
     """
     Add a page-specific H1 to pages that lack one (or only have a site-logo H1).
@@ -330,15 +367,9 @@ def fix_h1(site_dir: str, langs: list, groq_api_key: str = None) -> None:
                 continue
 
             # Find insertion point: top of main content area
-            insert_after = None
-            for marker in ('<div class="entry-content">', '<main', '<article', '<div id="content">', '<div class="content">'):
-                pos = html.find(marker)
-                if pos >= 0:
-                    insert_after = html.find('>', pos) + 1
-                    break
-
+            insert_after = _find_content_insert_point(html)
             if insert_after is None:
-                continue  # can't find a good place
+                continue
 
             # Get page title for context
             title_m = re.search(r'<title>([^<]+)</title>', html)
@@ -393,12 +424,7 @@ def fix_h1(site_dir: str, langs: list, groq_api_key: str = None) -> None:
                 lhtml = open(lang_fpath, encoding='utf-8', errors='ignore').read()
                 if CONTENT_H1_RE.search(lhtml):
                     continue
-                insert_after = None
-                for marker in ('<div class="entry-content">', '<main', '<article', '<div id="content">', '<div class="content">'):
-                    pos = lhtml.find(marker)
-                    if pos >= 0:
-                        insert_after = lhtml.find('>', pos) + 1
-                        break
+                insert_after = _find_content_insert_point(lhtml)
                 if insert_after is None:
                     continue
                 lhtml = lhtml[:insert_after] + f'\n<h1 class="entry-h1">{tr_h1}</h1>' + lhtml[insert_after:]
@@ -1001,19 +1027,23 @@ def fix_og_image(site_dir: str, site_domain: str = None):
                         f.write(html)
                 continue
 
-            # Try to find an image on this page
-            img_m = re.search(r'<img[^>]+src=["\']([^"\']+\.(jpg|jpeg|png|webp|gif))["\']', html, re.IGNORECASE)
-            if img_m:
+            # Try to find a suitable image on this page (skip spacers/icons/gifs)
+            img_url = None
+            for img_m in re.finditer(r'<img[^>]+src=["\']([^"\']+\.(jpg|jpeg|png|webp|gif))["\']', html, re.IGNORECASE):
                 src = img_m.group(1)
+                if _is_bad_og_image(src):
+                    continue
                 if src.startswith('http'):
                     img_url = src
                 elif src.startswith('/'):
                     img_url = BASE_URL.rstrip('/') + src
                 else:
                     img_url = BASE_URL.rstrip('/') + '/' + src
-            elif fallback_img:
+                break
+
+            if not img_url and fallback_img:
                 img_url = fallback_img
-            else:
+            if not img_url:
                 continue
 
             tag = f'<meta property="og:image" content="{img_url}">\n'
@@ -1036,11 +1066,35 @@ def fix_og_image(site_dir: str, site_domain: str = None):
                 f.write(html)
 
 
+_BAD_OG_IMAGE_RE = re.compile(
+    r'(spacer|blank|pixel|1x1|transparent|clear|placeholder|dummy|example\.com'
+    r'|favicon|\.ico$)',
+    re.IGNORECASE
+)
+
+def _is_bad_og_image(src: str) -> bool:
+    """Return True if the image URL is unsuitable for og:image (spacer, pixel, icon, etc.)."""
+    name = src.split('/')[-1].split('?')[0].lower()
+    # Reject known junk filenames
+    if _BAD_OG_IMAGE_RE.search(src):
+        return True
+    # Reject GIFs that aren't from a real photo path (GIFs used for spacers are common)
+    if name.endswith('.gif'):
+        return True
+    return False
+
+
 def _find_fallback_og_image(site_dir: str, base_url: str) -> str | None:
-    """Find any image in the site to use as fallback og:image."""
+    """Find a suitable image in the site to use as fallback og:image (skips spacers/icons)."""
     import glob
     for ext in ('*.jpg', '*.jpeg', '*.png', '*.webp'):
         imgs = glob.glob(os.path.join(site_dir, '**', ext), recursive=True)
+        # Filter out web.archive dirs and bad images
+        imgs = [
+            i for i in imgs
+            if 'web.archive.org' not in i
+            and not _is_bad_og_image(i)
+        ]
         if imgs:
             rel = os.path.relpath(imgs[0], site_dir).replace(os.sep, '/')
             return base_url.rstrip('/') + '/' + rel

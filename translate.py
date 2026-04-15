@@ -670,21 +670,22 @@ def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: lis
 
     confirmed_langs = []
 
-    # Determine output path: flat HTML keeps filename, subdir HTML → index.html
+    # Determine output path: always preserve original filename.
+    # index.html stays index.html; article.html stays article.html.
+    # (Previously subdir pages were all mapped to index.html, which caused
+    #  all but the first article per directory to be skipped.)
     src_fname = os.path.basename(rel_path)
-    is_flat   = _is_flat_root(rel_path)
+    page_dir  = os.path.dirname(rel_path.lstrip('/'))
 
     for lang in target_langs:
         if lang == source_lang:
             continue  # never translate into the source language
 
-        if is_flat and src_fname != 'index.html':
-            out_dir  = os.path.join(SITE, lang)
-            out_path = os.path.join(out_dir, src_fname)
-        else:
-            page_dir = os.path.dirname(rel_path.lstrip('/'))
+        if page_dir:
             out_dir  = os.path.join(SITE, lang, page_dir)
-            out_path = os.path.join(out_dir, 'index.html')
+        else:
+            out_dir  = os.path.join(SITE, lang)
+        out_path = os.path.join(out_dir, src_fname)
 
         if skip_existing and not dry_run and os.path.exists(out_path):
             print(f'    → {lang}: skip (exists)')

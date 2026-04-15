@@ -42,6 +42,10 @@ def run_audit_on_dir(site_dir: str) -> dict:
         with open(fpath, encoding='utf-8', errors='ignore') as f:
             html = f.read()
 
+        # Skip XML feeds (RSS/Atom)
+        if html.lstrip().startswith('<?xml') or html.lstrip().startswith('<rss'):
+            continue
+
         # Skip noindex pages
         if re.search(r'<meta[^>]*name=["\']robots["\'][^>]*noindex', html, re.IGNORECASE):
             continue

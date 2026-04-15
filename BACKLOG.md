@@ -21,8 +21,7 @@ _Нет открытых багов._
 
 | Задача | Описание |
 |---|---|
-| Twitter Card | Добавлять `twitter:card`, `twitter:title`, `twitter:description`, `twitter:image` |
-| Preconnect для Google Fonts | `<link rel="preconnect">` если сайт грузит внешние шрифты |
+| Rich Schema по типу сайта | `fix_schema_rich(site_type)`: blog → `BlogPosting`+`Person`, gallery → `ImageObject`, local → `LocalBusiness`. Тип сайта задаётся один раз при запуске, дальше автоматически. |
 | OG Image фильтр | Не брать spacer.gif/логотипы, проверять минимальный размер |
 | FAQ Schema | FAQPage JSON-LD если на странице есть вопросы (H3 + p паттерн) |
 | Изображения без alt | Добавить в аудит и в фиксы |
