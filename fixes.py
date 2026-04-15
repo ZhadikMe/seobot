@@ -33,6 +33,10 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
     try:
         if step_key == 'fix_archive_scripts':
             fix_archive_scripts(site_dir)
+        elif step_key == 'fix_preloader':
+            fix_preloader(site_dir)
+        elif step_key == 'fix_h1':
+            fix_h1(site_dir, langs, groq_api_key)
         elif step_key == 'fix_descriptions':
             fix_descriptions(site_dir, groq_api_key)
         elif step_key == 'fix_schema':
@@ -75,9 +79,19 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
 
 def fix_archive_scripts(site_dir: str):
     """
-    Remove web.archive.org injected scripts and styles from all HTML files.
-    Handles sites stored as-is (site/ dir) that weren't processed by detector.py.
+    Remove web.archive.org injected scripts/styles and cleanup artifacts from HTML files.
+    Also removes .bak files and control characters left by archive processing.
     """
+    # Step 1: Delete .bak files across the whole site tree
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
+        for fname in files:
+            if fname.endswith('.bak'):
+                try:
+                    os.remove(os.path.join(root, fname))
+                except OSError:
+                    pass
+
     ARCHIVE_SCRIPT_PATTERNS = [
         # Bundle playback and wombat scripts
         r'<script[^>]*web-static\.archive\.org[^>]*>.*?</script>',
@@ -90,6 +104,9 @@ def fix_archive_scripts(site_dir: str):
         r'<!-- BEGIN WAYBACK TOOLBAR INSERT -->.*?<!-- END WAYBACK TOOLBAR INSERT -->',
     ]
 
+    # Control characters that don't belong in HTML (keep tab=\x09, LF=\x0a, CR=\x0d)
+    _CONTROL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
         for fname in files:
@@ -99,19 +116,25 @@ def fix_archive_scripts(site_dir: str):
             with open(fpath, encoding='utf-8', errors='ignore') as f:
                 html = f.read()
 
-            if 'archive.org' not in html:
-                continue
-
             original = html
-            for pattern in ARCHIVE_SCRIPT_PATTERNS:
-                html = re.sub(pattern, '', html, flags=re.DOTALL | re.IGNORECASE)
 
-            # Also fix archive URLs left in href/src attributes
-            html = re.sub(
-                r'(?:https?://web\.archive\.org)?/web/\d{14}[a-z_]*/https?://([^\s"\'<>]+)',
-                lambda m: 'https://' + m.group(1),
-                html
-            )
+            # Remove control characters from all HTML files
+            html = _CONTROL_RE.sub('', html)
+
+            # Remove orphan </script> tags: two consecutive </script> with only
+            # whitespace between them — the second one has no matching opening tag
+            html = re.sub(r'</script>(\s*\n\s*)</script>', r'</script>\1', html)
+
+            if 'archive.org' in html:
+                for pattern in ARCHIVE_SCRIPT_PATTERNS:
+                    html = re.sub(pattern, '', html, flags=re.DOTALL | re.IGNORECASE)
+
+                # Also fix archive URLs left in href/src attributes
+                html = re.sub(
+                    r'(?:https?://web\.archive\.org)?/web/\d{14}[a-z_]*/https?://([^\s"\'<>]+)',
+                    lambda m: 'https://' + m.group(1),
+                    html
+                )
 
             if html != original:
                 with open(fpath, 'w', encoding='utf-8') as f:
@@ -276,6 +299,135 @@ def fix_lang_descriptions(site_dir: str, langs: list, groq_api_key: str,
                     f.write(html)
             except Exception:
                 pass
+
+
+def fix_h1(site_dir: str, langs: list, groq_api_key: str = None) -> None:
+    """
+    Add a page-specific H1 to pages that lack one (or only have a site-logo H1).
+
+    WordPress themes often put an H1 on the site logo (class="site-title") — that's
+    not a content H1. We detect that case and inject a proper H1 at the top of the
+    main content area, generated from the page <title> + content snippet via Groq.
+    Falls back to the page title slug when Groq is unavailable.
+    """
+    SKIP = set(LANG_DIRS + ARCHIVE_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules'])
+    SITE_TITLE_RE = re.compile(r'<h1[^>]*class=["\'][^"\']*site-title[^"\']*["\'][^>]*>', re.IGNORECASE)
+    CONTENT_H1_RE = re.compile(r'<h1(?![^>]*class=["\'][^"\']*site-title)[^>]*>(.+?)</h1>', re.IGNORECASE | re.DOTALL)
+
+    pages_fixed = {}  # rel → h1_text (EN)
+
+    # ── Pass 1: fix root EN pages ──────────────────────────────────────────────
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if os.path.basename(d) not in SKIP]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            html = open(fpath, encoding='utf-8', errors='ignore').read()
+
+            # Skip if page already has a real content H1 (not site-title)
+            if CONTENT_H1_RE.search(html):
+                continue
+
+            # Find insertion point: top of main content area
+            insert_after = None
+            for marker in ('<div class="entry-content">', '<main', '<article', '<div id="content">', '<div class="content">'):
+                pos = html.find(marker)
+                if pos >= 0:
+                    insert_after = html.find('>', pos) + 1
+                    break
+
+            if insert_after is None:
+                continue  # can't find a good place
+
+            # Get page title for context
+            title_m = re.search(r'<title>([^<]+)</title>', html)
+            title = re.sub(r'\s*[|\-–—].*$', '', title_m.group(1)).strip() if title_m else ''
+            if not title:
+                continue
+
+            # Build content snippet for Groq
+            body_m = re.search(r'<body[^>]*>(.*)', html, re.DOTALL)
+            body_text = re.sub(r'<[^>]+>', ' ', body_m.group(1) if body_m else html)
+            body_text = re.sub(r'\s+', ' ', body_text).strip()
+            snippet = body_text[:300]
+
+            # Generate H1 text
+            h1_text = _make_h1_text(title, snippet, groq_api_key)
+            if not h1_text:
+                continue
+
+            # Inject H1
+            html = html[:insert_after] + f'\n<h1 class="entry-h1">{h1_text}</h1>' + html[insert_after:]
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(html)
+
+            rel = os.path.relpath(fpath, site_dir)
+            pages_fixed[rel] = h1_text
+
+    if not pages_fixed or not groq_api_key:
+        return
+
+    # ── Pass 2: translate H1 to lang versions ─────────────────────────────────
+    unique_h1s = list(dict.fromkeys(pages_fixed.values()))
+
+    for lang in langs:
+        lang_dir = os.path.join(site_dir, lang)
+        if not os.path.isdir(lang_dir):
+            continue
+        lang_name = _GROQ_LANG_NAMES.get(lang, lang)
+
+        try:
+            translated = _groq_translate_batch(groq_api_key, unique_h1s, lang_name)
+            h1_map = dict(zip(unique_h1s, translated))
+            time.sleep(1.5)
+        except Exception:
+            continue
+
+        for rel, en_h1 in pages_fixed.items():
+            lang_fpath = os.path.join(lang_dir, os.path.basename(rel))
+            if not os.path.exists(lang_fpath):
+                continue
+            tr_h1 = h1_map.get(en_h1, en_h1)
+            try:
+                lhtml = open(lang_fpath, encoding='utf-8', errors='ignore').read()
+                if CONTENT_H1_RE.search(lhtml):
+                    continue
+                insert_after = None
+                for marker in ('<div class="entry-content">', '<main', '<article', '<div id="content">', '<div class="content">'):
+                    pos = lhtml.find(marker)
+                    if pos >= 0:
+                        insert_after = lhtml.find('>', pos) + 1
+                        break
+                if insert_after is None:
+                    continue
+                lhtml = lhtml[:insert_after] + f'\n<h1 class="entry-h1">{tr_h1}</h1>' + lhtml[insert_after:]
+                with open(lang_fpath, 'w', encoding='utf-8') as f:
+                    f.write(lhtml)
+            except Exception:
+                pass
+
+
+def _make_h1_text(title: str, snippet: str, groq_api_key: str = None) -> str:
+    """Generate an H1 from page title + content snippet via Groq, or fall back to title."""
+    if groq_api_key and snippet:
+        prompt = (
+            f'Write a concise H1 heading (5-10 words) for this webpage.\n'
+            f'Page title: "{title}"\n'
+            f'Content excerpt: {snippet}\n'
+            f'Requirements: plain text only, no markdown, no quotes, no punctuation at end, '
+            f'must be more specific than just the site name.'
+        )
+        try:
+            result = _groq_call(groq_api_key, [{'role': 'user', 'content': prompt}],
+                                max_tokens=25, temperature=0.3)
+            result = result.strip('"\'').strip()
+            if 5 < len(result) < 100:
+                return result
+        except Exception:
+            pass
+    # Fallback: use the page title directly
+    return title if title else ''
 
 
 def fix_h2(site_dir: str, langs: list, groq_api_key: str = None) -> None:
@@ -824,8 +976,29 @@ def fix_og_image(site_dir: str, site_domain: str = None):
             fpath = os.path.join(root, fname)
             with open(fpath, encoding='utf-8', errors='ignore') as f:
                 html = f.read()
+            original_html = html
+
+            # Normalize existing relative og:image URLs to absolute
+            def _make_og_absolute(m):
+                src = m.group(1)
+                if src.startswith('http'):
+                    return m.group(0)
+                abs_src = (BASE_URL.rstrip('/') + src) if src.startswith('/') else (BASE_URL.rstrip('/') + '/' + src)
+                return m.group(0).replace(src, abs_src)
+
+            html = re.sub(
+                r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']',
+                _make_og_absolute, html, flags=re.IGNORECASE
+            )
+            html = re.sub(
+                r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']',
+                _make_og_absolute, html, flags=re.IGNORECASE
+            )
 
             if re.search(r'og:image', html):
+                if html != original_html:
+                    with open(fpath, 'w', encoding='utf-8') as f:
+                        f.write(html)
                 continue
 
             # Try to find an image on this page
@@ -922,6 +1095,40 @@ def fix_twitter_card(site_dir: str):
 
             with open(fpath, 'w', encoding='utf-8') as f:
                 f.write(html)
+
+
+def fix_preloader(site_dir: str):
+    """
+    Add display:none !important to preloader/loading-screen selectors in CSS files.
+    Prevents sites from getting stuck on loading animations when JS fails to run
+    (common with web-archive sites where script tags may be broken or missing).
+    Targets: .preloader, #preloader, .loading, .loading-screen, .page-loader, etc.
+    """
+    PRELOADER_SELECTORS = [
+        r'\.preloader', r'#preloader', r'\.loading-screen', r'\.page-loader',
+        r'\.page-loading', r'\.site-preloader', r'\.site-loader',
+    ]
+    # Matches selector { ... } where display:none is not already present
+    _sel_pattern = re.compile(
+        r'(' + '|'.join(PRELOADER_SELECTORS) + r')(\s*\{)(?![^}]*display\s*:\s*none)',
+        re.IGNORECASE
+    )
+
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git', 'node_modules'] + ARCHIVE_DIRS]
+        for fname in files:
+            if not fname.endswith('.css'):
+                continue
+            fpath = os.path.join(root, fname)
+            with open(fpath, encoding='utf-8', errors='ignore') as f:
+                css = f.read()
+
+            original = css
+            css = _sel_pattern.sub(r'\1\2\n    display: none !important;', css)
+
+            if css != original:
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    f.write(css)
 
 
 def fix_cloudflare_stubs(site_dir: str):
@@ -1372,6 +1579,156 @@ def fix_internal_links(site_dir: str):
                 f.write(new_html)
 
 
+def fix_translated_relative_links(site_dir: str):
+    """
+    Fix relative href/src links in translated pages (lang subfolders) so they
+    resolve correctly after being moved into a subdirectory.
+
+    Problem: translated pages are created by copying root HTML into de/, fr/, etc.
+    A root page at depth 0 has links like href="p/page.html".
+    A translated page at de/ (depth 1) inherits the same href, but now
+    href="p/page.html" resolves to de/p/page.html (wrong).
+
+    Fix: for each relative link in a translated page that doesn't resolve to an
+    existing file, climb up to the root and check — if it exists there, prepend
+    the appropriate number of '../' to reach the root.
+    """
+    LANG_DIRS = {
+        'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
+        'el', 'uk', 'ko', 'zh', 'ja', 'sk', 'fi', 'ar', 'hi',
+    }
+    ATTR_PATTERN = re.compile(
+        r'((?:href|src|action)=["\'])(?!https?://|//|#|mailto:|javascript:|data:)([^"\']+)(["\'])',
+        re.IGNORECASE
+    )
+    # Pattern for absolute paths like /de/path that might not exist in translated versions
+    ABS_LANG_PATTERN = re.compile(
+        r'((?:href|src|action)=["\'])(/' + '|/'.join(
+            ['ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
+             'el', 'uk', 'ko', 'zh', 'ja', 'sk', 'fi', 'ar', 'hi']
+        ) + r')(/[^"\'?#]*)(["\'])',
+        re.IGNORECASE
+    )
+
+    for lang in sorted(os.listdir(site_dir)):
+        lang_dir = os.path.join(site_dir, lang)
+        if lang not in LANG_DIRS or not os.path.isdir(lang_dir):
+            continue
+
+        for root, dirs, files in os.walk(lang_dir):
+            dirs[:] = [d for d in dirs if d not in ['scripts', '.git', 'node_modules']]
+            for fname in files:
+                if not fname.endswith('.html'):
+                    continue
+                fpath = os.path.join(root, fname)
+
+                with open(fpath, encoding='utf-8', errors='ignore') as f:
+                    html = f.read()
+
+                # How many levels deep is this file inside the lang dir?
+                rel_in_lang = os.path.relpath(fpath, lang_dir)
+                depth_in_lang = len(rel_in_lang.replace(os.sep, '/').split('/'))
+                # depth_in_lang = 1 for lang/index.html, 2 for lang/a/b.html, etc.
+                to_root = '../' * depth_in_lang  # e.g. '../' or '../../'
+
+                changed = False
+
+                # Relative path of this file within the lang dir
+                # e.g. "2021/01/index.html" for de/2021/01/index.html
+                rel_in_lang = os.path.relpath(fpath, lang_dir).replace(os.sep, '/')
+                # Equivalent directory at the site root
+                root_equiv_dir = os.path.normpath(
+                    os.path.join(site_dir, os.path.dirname(rel_in_lang))
+                )
+
+                def fix_attr(m):
+                    nonlocal changed
+                    attr_prefix = m.group(1)   # e.g. 'href="'
+                    href = m.group(2)           # the path value
+                    attr_suffix = m.group(3)   # closing quote
+
+                    # Skip empty or absolute paths
+                    if not href or href.startswith('/'):
+                        return m.group(0)
+
+                    # Separate anchor fragment (e.g. "page.html#section")
+                    if '#' in href:
+                        file_part, anchor = href.split('#', 1)
+                        anchor_suffix = '#' + anchor
+                    else:
+                        file_part, anchor_suffix = href, ''
+
+                    if not file_part:
+                        return m.group(0)  # pure anchor link like "#id"
+
+                    # Resolve the file part relative to the current file's directory
+                    current_dir = os.path.dirname(fpath)
+                    resolved = os.path.normpath(os.path.join(current_dir, file_part))
+
+                    # Already resolves to an existing file/dir → leave it
+                    if os.path.exists(resolved):
+                        return m.group(0)
+
+                    # Strategy 1: check in the SAME directory at the site root
+                    root_same_dir = os.path.normpath(os.path.join(root_equiv_dir, file_part))
+                    if os.path.exists(root_same_dir):
+                        root_rel = os.path.relpath(root_same_dir, site_dir).replace(os.sep, '/')
+                        new_href = to_root + root_rel + anchor_suffix
+                        changed = True
+                        return attr_prefix + new_href + attr_suffix
+
+                    # Strategy 2: check at the site root directly
+                    root_top = os.path.normpath(os.path.join(site_dir, file_part))
+                    if os.path.exists(root_top):
+                        new_href = to_root + file_part + anchor_suffix
+                        changed = True
+                        return attr_prefix + new_href + attr_suffix
+
+                    return m.group(0)
+
+                new_html = ATTR_PATTERN.sub(fix_attr, html)
+
+                # Fix absolute /lang/path links that point to non-existent translated pages
+                # Fall back to /path (source lang at root) when translation doesn't exist,
+                # or to the nearest parent directory index when neither exists.
+                def fix_abs_lang(m):
+                    nonlocal changed
+                    attr_prefix = m.group(1)   # e.g. 'href="'
+                    lang_seg = m.group(2)       # e.g. '/de'
+                    rest = m.group(3)           # e.g. '/p/privacy-policy.html'
+                    attr_suffix = m.group(4)   # closing quote
+                    abs_path = lang_seg + rest  # e.g. '/de/p/privacy-policy.html'
+                    translated_file = site_dir.rstrip('/\\') + abs_path.replace('/', os.sep)
+                    if os.path.exists(translated_file):
+                        return m.group(0)  # translation exists, leave it
+                    # Strategy 1: root-level fallback (Arabic source)
+                    root_file = site_dir.rstrip('/\\') + rest.replace('/', os.sep)
+                    if os.path.exists(root_file):
+                        changed = True
+                        return attr_prefix + rest + attr_suffix
+                    # Strategy 2: parent directory index in same lang
+                    parent_rest = os.path.dirname(rest.rstrip('/'))
+                    if parent_rest and parent_rest != '/':
+                        parent_idx = lang_seg + parent_rest + '/index.html'
+                        parent_file = site_dir.rstrip('/\\') + parent_idx.replace('/', os.sep)
+                        if os.path.exists(parent_file):
+                            changed = True
+                            return attr_prefix + parent_idx + attr_suffix
+                    # Strategy 3: lang root index
+                    lang_index = lang_seg + '/index.html'
+                    lang_index_file = site_dir.rstrip('/\\') + lang_index.replace('/', os.sep)
+                    if os.path.exists(lang_index_file):
+                        changed = True
+                        return attr_prefix + lang_index + attr_suffix
+                    return m.group(0)
+
+                new_html = ABS_LANG_PATTERN.sub(fix_abs_lang, new_html)
+
+                if changed and new_html != html:
+                    with open(fpath, 'w', encoding='utf-8') as f:
+                        f.write(new_html)
+
+
 def fix_lang_switcher(site_dir: str, source_lang: str = 'en'):
     """
     Inject a floating language switcher dropdown into every HTML page.
@@ -1412,22 +1769,27 @@ def fix_lang_switcher(site_dir: str, source_lang: str = 'en'):
     if len(available_langs) <= 1:
         return  # Nothing to switch between
 
+    # Always place switcher on the left — bottom-right conflicts with scroll-to-top
+    # buttons, cookie banners, and chat widgets common across themes.
+    h_side = 'left'
+    panel_side = 'left'
+
     # Build CSS + JS (injected once per page)
-    SWITCHER_STYLE = """
+    SWITCHER_STYLE = f"""
 <style id="lang-switcher-style">
-#lang-switcher{position:fixed;bottom:20px;right:20px;z-index:9999;font-family:sans-serif}
-#lang-btn{background:#222;color:#fff;border:none;border-radius:24px;padding:8px 16px;
+#lang-switcher{{position:fixed;bottom:20px;{h_side}:20px;z-index:9999;font-family:sans-serif}}
+#lang-btn{{background:#222;color:#fff;border:none;border-radius:24px;padding:8px 16px;
   font-size:14px;cursor:pointer;display:flex;align-items:center;gap:6px;
-  box-shadow:0 2px 8px rgba(0,0,0,.35);transition:background .2s}
-#lang-btn:hover{background:#444}
-#lang-panel{display:none;position:absolute;bottom:44px;right:0;background:#fff;
+  box-shadow:0 2px 8px rgba(0,0,0,.35);transition:background .2s}}
+#lang-btn:hover{{background:#444}}
+#lang-panel{{display:none;position:absolute;bottom:44px;{panel_side}:0;background:#fff;
   border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.18);overflow:hidden;
-  min-width:160px;max-height:320px;overflow-y:auto}
-#lang-panel.open{display:block}
-.lang-item{display:flex;align-items:center;gap:8px;padding:10px 16px;
-  text-decoration:none;color:#222;font-size:14px;transition:background .15s}
-.lang-item:hover{background:#f5f5f5}
-.lang-item.active{background:#f0f7ff;font-weight:600}
+  min-width:160px;max-height:320px;overflow-y:auto}}
+#lang-panel.open{{display:block}}
+.lang-item{{display:flex;align-items:center;gap:8px;padding:10px 16px;
+  text-decoration:none;color:#222;font-size:14px;transition:background .15s}}
+.lang-item:hover{{background:#f5f5f5}}
+.lang-item.active{{background:#f0f7ff;font-weight:600}}
 </style>"""
 
     SWITCHER_JS = """
@@ -1455,8 +1817,10 @@ def fix_lang_switcher(site_dir: str, source_lang: str = 'en'):
             # Remove previously injected switcher so it gets regenerated with
             # up-to-date language list (new translations may have been added)
             if 'lang-switcher' in html:
-                html = re.sub(r'<style id="lang-switcher-style">.*?</style>\s*', '', html, flags=re.DOTALL)
-                html = re.sub(r'\s*<div id="lang-switcher">.*?</div>\s*<script id="lang-switcher-script">.*?</script>', '', html, flags=re.DOTALL)
+                html = re.sub(r'<style id="lang-switcher-style">.*?</style>\n?', '', html, flags=re.DOTALL)
+                # Match from opening <div> all the way through the closing </script>
+                # (avoids the bug where .*?</div> stops at the first nested </div>)
+                html = re.sub(r'\n?<div id="lang-switcher">.*?<script id="lang-switcher-script">.*?</script>', '', html, flags=re.DOTALL)
 
             # Determine current page's language and slug
             rel = os.path.relpath(fpath, site_dir).replace(os.sep, '/')
@@ -1482,9 +1846,15 @@ def fix_lang_switcher(site_dir: str, source_lang: str = 'en'):
                 lflag, lname = LANG_NAMES.get(lang, ('🌐', lang.upper()))
                 is_active = (lang == current_lang)
 
-                if lang == 'en':
-                    href = to_root + slug if to_root else slug
-                    # English is always the canonical — include it
+                if lang == source_lang:
+                    candidate_path = os.path.normpath(os.path.join(site_dir, slug))
+                    if not is_active and not os.path.exists(candidate_path):
+                        # Source lang page doesn't exist (e.g. archive index not captured)
+                        # Fall back to the root homepage instead
+                        href = to_root + 'index.html' if to_root else 'index.html'
+                    else:
+                        href = to_root + slug if to_root else slug
+                    # Source lang is always at root — include it
                 else:
                     # Check this page actually exists in the lang dir before linking
                     translated_path = os.path.join(site_dir, lang, slug.replace('/', os.sep))
@@ -1507,7 +1877,15 @@ def fix_lang_switcher(site_dir: str, source_lang: str = 'en'):
             )
 
             html = html.replace('</head>', SWITCHER_STYLE + '\n</head>', 1)
-            html = html.replace('</body>', switcher_html + '\n</body>', 1)
+            # Insert switcher AFTER the LAST </body> tag (as sibling of <body> under <html>)
+            # Using rfind avoids the Blogger/CMS pattern where a fake </body> appears
+            # inside a <noscript> block earlier in the file.
+            # Placing it outside <body> also bypasses overflow:hidden / transform on body.
+            last_body = html.rfind('</body>')
+            if last_body != -1:
+                html = html[:last_body + len('</body>')] + '\n' + switcher_html + html[last_body + len('</body>'):]
+            else:
+                html += '\n' + switcher_html
 
             with open(fpath, 'w', encoding='utf-8') as f:
                 f.write(html)

@@ -768,9 +768,11 @@ async def run_fixes(message: Message, state: FSMContext):
     SEO_STEPS = [
         ('🛡️ Удаляю Cloudflare заглушки...', 'fix_cloudflare_stubs'),
         ('🧹 Очищаю archive.org скрипты...', 'fix_archive_scripts'),
+        ('⏳ Отключаю preloader...', 'fix_preloader'),
         ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
         ('📅 Обновляю год в заголовках...', 'fix_title_refresh'),
         ('📝 Генерирую уникальные descriptions...', 'fix_descriptions'),
+        ('🏷️ Добавляю H1 заголовки...', 'fix_h1'),
         ('🏷️ Добавляю H2 заголовки...', 'fix_h2'),
         ('📄 Расширяю тонкие страницы...', 'fix_thin_content'),
         ('🗂️ Добавляю Schema.org (BreadcrumbList)...', 'fix_schema'),
@@ -917,6 +919,7 @@ async def run_fixes_from_data(chat_id: int, data: dict, mode: str):
     SEO_STEPS = [
         ('🛡️ Удаляю Cloudflare заглушки...', 'fix_cloudflare_stubs'),
         ('🧹 Очищаю archive.org скрипты...', 'fix_archive_scripts'),
+        ('⏳ Отключаю preloader...', 'fix_preloader'),
         ('🔗 Добавляю canonical URLs...', 'fix_canonical'),
         ('📅 Обновляю год в заголовках...', 'fix_title_refresh'),
         ('📝 Генерирую descriptions...', 'fix_descriptions'),
