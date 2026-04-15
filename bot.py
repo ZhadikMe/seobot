@@ -64,7 +64,9 @@ def _queue_position(user_id: int) -> int:
 # ── FSM States ────────────────────────────────────────────────────────────────
 
 class SEOFlow(StatesGroup):
+    waiting_scenario     = State()
     waiting_repo         = State()
+    waiting_archive_url  = State()
     waiting_mode         = State()
     waiting_domain       = State()
     waiting_github_token = State()
@@ -88,6 +90,13 @@ LANG_LABELS = {
     'ja': '🇯🇵 JA', 'sk': '🇸🇰 SK', 'fi': '🇫🇮 FI', 'ar': '🇸🇦 AR',
     'hi': '🇮🇳 HI',
 }
+
+
+def scenario_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text='📥 Веб-архив',    callback_data='scenario:archive'),
+        InlineKeyboardButton(text='📂 GitHub репо',  callback_data='scenario:github'),
+    ]])
 
 
 def langs_choice_keyboard() -> InlineKeyboardMarkup:
@@ -175,14 +184,97 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
         '👋 Привет! Я SEO-бот.\n\n'
-        'Анализирую сайты на GitHub, нахожу SEO-проблемы '
-        'и создаю Pull Request с исправлениями.\n\n'
-        '📎 Отправь ссылку на GitHub репозиторий:\n'
-        '`https://github.com/user/repo`',
-        parse_mode='Markdown',
+        'Я умею скачивать сайты из веб-архива, анализирую их, нахожу SEO-проблемы '
+        'и исправляю их, а также создаю Pull Request с исправлениями в ваш репозиторий.\n\n'
+        'Что хочешь сделать?',
         reply_markup=main_keyboard()
     )
-    await state.set_state(SEOFlow.waiting_repo)
+    await message.answer(
+        '📥 *Веб-архив* — скачать сайт с web.archive.org и применить SEO-исправления\n'
+        '📂 *GitHub репо* — проанализировать и исправить существующий репозиторий',
+        parse_mode='Markdown',
+        reply_markup=scenario_keyboard()
+    )
+    await state.set_state(SEOFlow.waiting_scenario)
+
+
+@dp.callback_query(SEOFlow.waiting_scenario, F.data.startswith('scenario:'))
+async def chose_scenario(callback: CallbackQuery, state: FSMContext):
+    scenario = callback.data.split(':')[1]
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    if scenario == 'github':
+        await callback.message.answer(
+            '📎 Отправь ссылку на GitHub репозиторий:\n`https://github.com/user/repo`',
+            parse_mode='Markdown',
+        )
+        await state.set_state(SEOFlow.waiting_repo)
+    else:
+        await callback.message.answer(
+            '📥 Отправь ссылку на снапшот из веб-архива:\n\n'
+            '`https://web.archive.org/web/20230101120000/https://example.com/`\n\n'
+            '_Найти: web.archive.org → введи домен → выбери дату_',
+            parse_mode='Markdown',
+        )
+        await state.set_state(SEOFlow.waiting_archive_url)
+    await callback.answer()
+
+
+@dp.message(SEOFlow.waiting_archive_url)
+async def got_archive_url(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    if not _user_in_system(uid) and _queue_size() >= MAX_QUEUE + 1:
+        await message.answer(
+            f'⏳ *Очередь заполнена* ({MAX_QUEUE + 1} задания).\n\nПопробуй через несколько минут.',
+            parse_mode='Markdown'
+        )
+        return
+
+    url = message.text.strip().rstrip('/')
+    m = re.match(r'https?://web\.archive\.org/web/(\d{14})/https?://([^/\s]+)', url)
+    if not m:
+        await message.answer(
+            '⚠️ Не похоже на ссылку из веб-архива.\n\n'
+            'Пример:\n`https://web.archive.org/web/20230101120000/https://example.com/`',
+            parse_mode='Markdown'
+        )
+        return
+
+    timestamp = m.group(1)
+    domain = re.sub(r'^www\.', '', m.group(2))
+
+    status_msg = await message.answer(f'⏳ Запрашиваю CDX для `{domain}`...', parse_mode='Markdown')
+
+    from pull import _cdx_estimate
+    loop = asyncio.get_event_loop()
+    total = await loop.run_in_executor(None, _cdx_estimate, domain, timestamp)
+
+    if total:
+        est_min = max(1, round(total * 10 / 60))
+        est_text = f'~{total} уникальных URL → ≈{est_min} мин скачивания'
+    else:
+        est_min = 0
+        est_text = 'CDX недоступен — время скачивания неизвестно'
+
+    log.info(f'[archive] CDX {domain}: {total} URLs, ~{est_min} min')
+
+    await bot.edit_message_text(
+        text=f'✅ Домен: `{domain}`\n📊 {est_text}',
+        chat_id=message.chat.id, message_id=status_msg.message_id,
+        parse_mode='Markdown'
+    )
+
+    await state.update_data(
+        source='archive',
+        archive_url=url,
+        archive_domain=domain,
+        archive_timestamp=timestamp,
+        archive_total_estimated=total,
+        selected_langs={'ru', 'de', 'fr', 'es'},
+    )
+
+    await message.answer('Что хочешь сделать с сайтом?', reply_markup=mode_keyboard())
+    await state.set_state(SEOFlow.waiting_mode)
 
 
 @dp.message(Command('info'))
@@ -210,14 +302,28 @@ async def cmd_cancel(message: Message, state: FSMContext):
         return
 
     # Back navigation based on current state
-    if current_state == SEOFlow.waiting_mode:
-        # Back to: enter repo URL
+    if current_state in (SEOFlow.waiting_scenario, SEOFlow.waiting_repo, SEOFlow.waiting_archive_url):
+        # Top-level — restart
         await state.clear()
-        await message.answer(
-            '📎 Отправь ссылку на GitHub репозиторий:\n`https://github.com/user/repo`',
-            parse_mode='Markdown', reply_markup=main_keyboard()
-        )
-        await state.set_state(SEOFlow.waiting_repo)
+        await message.answer('Что хочешь сделать?', reply_markup=scenario_keyboard())
+        await state.set_state(SEOFlow.waiting_scenario)
+
+    elif current_state == SEOFlow.waiting_mode:
+        data = await state.get_data()
+        if data.get('source') == 'archive':
+            await state.update_data(source=None)
+            await message.answer(
+                '📥 Отправь ссылку на снапшот из веб-архива:',
+                reply_markup=main_keyboard()
+            )
+            await state.set_state(SEOFlow.waiting_archive_url)
+        else:
+            await state.clear()
+            await message.answer(
+                '📎 Отправь ссылку на GitHub репозиторий:\n`https://github.com/user/repo`',
+                parse_mode='Markdown', reply_markup=main_keyboard()
+            )
+            await state.set_state(SEOFlow.waiting_repo)
 
     elif current_state == SEOFlow.waiting_domain:
         # Back to: mode selection
@@ -370,6 +476,20 @@ async def _after_domain(message_or_callback, state: FSMContext):
     """Continue flow after domain step."""
     data = await state.get_data()
     mode = data.get('mode', 'audit')
+    source = data.get('source', 'github')
+
+    # Archive flow: skip token step, go straight to langs (or confirm for seo_only)
+    if source == 'archive':
+        if mode == 'seo_only':
+            await state.update_data(selected_langs=set())
+            await _show_archive_confirm(message_or_callback, state)
+        else:
+            await message_or_callback.answer(
+                '🌍 Выбери языки для перевода:',
+                reply_markup=langs_choice_keyboard()
+            )
+            await state.set_state(SEOFlow.waiting_langs)
+        return
 
     if mode == 'audit':
         await message_or_callback.answer(
@@ -457,17 +577,55 @@ async def skip_github_token(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+async def _show_archive_confirm(message_or_callback, state: FSMContext):
+    """Show confirm screen for archive flow (no audit preview — site not downloaded yet)."""
+    data = await state.get_data()
+    domain = data.get('archive_domain', '')
+    total = data.get('archive_total_estimated', 0)
+    mode = data.get('mode', 'full')
+    langs = sorted(data.get('selected_langs', []))
+
+    if total:
+        est_min = max(1, round(total * 10 / 60))
+        time_str = f'≈{est_min} мин скачивания + обработка'
+    else:
+        time_str = 'время скачивания неизвестно'
+
+    mode_labels = {
+        'full': '🔧 SEO + перевод',
+        'seo_only': '🛠️ Только SEO',
+        'translate_only': '🌍 Только перевод',
+        'audit': '🔍 Только аудит',
+    }
+    lang_str = ', '.join(l.upper() for l in langs) if langs else '—'
+
+    await message_or_callback.answer(
+        f'📋 *Подтверждение:*\n\n'
+        f'🌐 `{domain}`\n'
+        f'⚙️ {mode_labels.get(mode, mode)}\n'
+        f'🌍 Языки: {lang_str}\n'
+        f'⏱ {time_str}',
+        parse_mode='Markdown',
+        reply_markup=confirm_keyboard()
+    )
+    await state.set_state(SEOFlow.waiting_confirm)
+
+
 @dp.callback_query(SEOFlow.waiting_langs, F.data.startswith('langchoice:'))
 async def chose_lang_mode(callback: CallbackQuery, state: FSMContext):
     choice = callback.data.split(':')[1]
     await callback.message.edit_reply_markup(reply_markup=None)
+    data = await state.get_data()
+    source = data.get('source', 'github')
 
     if choice == 'all':
         await state.update_data(selected_langs=set(ALL_TARGET_LANGS))
-        await run_audit(callback.message, state)
+        if source == 'archive':
+            await _show_archive_confirm(callback.message, state)
+        else:
+            await run_audit(callback.message, state)
     else:
         # Show manual selection grid
-        data = await state.get_data()
         selected = data.get('selected_langs', {'ru', 'de', 'fr', 'es'})
         await callback.message.answer(
             '✏️ Выбери языки (нажми ▶️ Запустить когда готово):',
@@ -481,13 +639,17 @@ async def toggle_lang(callback: CallbackQuery, state: FSMContext):
     lang = callback.data.split(':')[1]
     data = await state.get_data()
     selected = data.get('selected_langs', set())
+    source = data.get('source', 'github')
 
     if lang == 'start':
         if not selected:
             await callback.answer('Выбери хотя бы один язык!', show_alert=True)
             return
         await callback.message.edit_reply_markup(reply_markup=None)
-        await run_audit(callback.message, state)
+        if source == 'archive':
+            await _show_archive_confirm(callback.message, state)
+        else:
+            await run_audit(callback.message, state)
         return
 
     if lang == 'all':
@@ -692,7 +854,9 @@ async def handle_confirm(callback: CallbackQuery, state: FSMContext):
 
     if answer == 'no':
         data = await state.get_data()
-        shutil.rmtree(data.get('tmp_dir', ''), ignore_errors=True)
+        tmp = data.get('tmp_dir', '')
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
         await state.clear()
         await callback.message.answer('👌 Окей, ничего не изменено.')
         return
@@ -720,11 +884,183 @@ async def handle_confirm(callback: CallbackQuery, state: FSMContext):
 
 
 
+async def _run_archive_fixes(message: Message, state: FSMContext):
+    """Pull site from web archive, run SEO fixes (no PR — no GitHub repo)."""
+    global _active_job, _job_queue
+
+    data = await state.get_data()
+    archive_url   = data['archive_url']
+    archive_domain = data['archive_domain']
+    archive_total  = data.get('archive_total_estimated', 0)
+    langs          = sorted(data.get('selected_langs', []))
+    mode           = data.get('mode', 'full')
+    site_domain    = data.get('site_domain')
+    translate_only = (mode == 'translate_only')
+    seo_only       = (mode == 'seo_only')
+
+    tmp_dir = tempfile.mkdtemp(prefix='seobot_pull_')
+    _active_job = {'user_id': state.key.user_id, 'tmp_dir': tmp_dir}
+    await state.update_data(tmp_dir=tmp_dir)
+
+    loop = asyncio.get_event_loop()
+    import functools
+
+    # ── Phase 1: download from archive ────────────────────────────────────────
+    if archive_total:
+        est_min = max(1, round(archive_total * 10 / 60))
+        dl_text = (f'📥 Скачиваю сайт из веб-архива...\n'
+                   f'🌐 `{archive_domain}`\n'
+                   f'📊 ~{archive_total} файлов, ≈{est_min} мин')
+    else:
+        dl_text = f'📥 Скачиваю сайт из веб-архива...\n🌐 `{archive_domain}`'
+
+    status = await message.answer(dl_text, parse_mode='Markdown')
+    _chat_id = message.chat.id
+    _msg_id  = status.message_id
+
+    log.info(f'[archive] pull_snapshot start: {archive_url}')
+
+    _last_cb = [0.0]
+
+    def pull_progress_cb(done, total, chat_id=_chat_id, msg_id=_msg_id):
+        import time as _t
+        now = _t.time()
+        if now - _last_cb[0] < 4:
+            return
+        _last_cb[0] = now
+        if total:
+            pct = min(done * 100 // total, 99)
+            text = f'📥 Скачиваю: {done}/{total} [{pct}%]...'
+        else:
+            text = f'📥 Скачиваю: {done} файлов...'
+        asyncio.run_coroutine_threadsafe(
+            bot.edit_message_text(text=text, chat_id=chat_id, message_id=msg_id),
+            loop
+        )
+
+    from pull import pull_snapshot
+    try:
+        site_dir = await loop.run_in_executor(
+            None, functools.partial(pull_snapshot, archive_url, tmp_dir, pull_progress_cb)
+        )
+    except Exception as e:
+        log.error(f'[archive] pull_snapshot failed: {e}')
+        await bot.edit_message_text(
+            text=f'❌ Ошибка скачивания:\n`{e}`',
+            chat_id=_chat_id, message_id=_msg_id, parse_mode='Markdown'
+        )
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        _active_job = None
+        await state.clear()
+        if _job_queue:
+            next_job = _job_queue.popleft()
+            await bot.send_message(next_job['chat_id'], '▶️ *Твой сайт начинает обрабатываться!*', parse_mode='Markdown')
+            asyncio.create_task(_process_queued_job(next_job))
+        return
+
+    log.info(f'[archive] Downloaded to {site_dir}')
+
+    # ── Phase 2: detect language ───────────────────────────────────────────────
+    from fixes import run_all_fixes
+    from translate import detect_source_lang
+    from audit import run_audit_on_dir
+
+    source_lang = await loop.run_in_executor(None, detect_source_lang, site_dir)
+    log.info(f'[archive] source_lang={source_lang}')
+
+    audit_before = run_audit_on_dir(site_dir)
+    log.info(f'[archive] audit before: {audit_before["failed"]}/{audit_before["total"]} failed')
+
+    await bot.edit_message_text(
+        text=f'✅ Скачано. Запускаю SEO-исправления...\n🌐 Язык: `{source_lang}`',
+        chat_id=_chat_id, message_id=_msg_id, parse_mode='Markdown'
+    )
+
+    # ── Phase 3: SEO steps ────────────────────────────────────────────────────
+    SEO_STEPS = [
+        ('🧹 Очищаю archive.org скрипты...',     'fix_archive_scripts'),
+        ('🔗 Добавляю canonical URLs...',          'fix_canonical'),
+        ('📅 Обновляю год в заголовках...',        'fix_title_refresh'),
+        ('📝 Генерирую descriptions...',            'fix_descriptions'),
+        ('🏷️ Добавляю H1...',                     'fix_h1'),
+        ('🗂️ Добавляю Schema.org...',             'fix_schema'),
+        ('🖼️ Добавляю OG images...',              'fix_og_image'),
+        ('🤖 Генерирую robots.txt...',             'fix_robots_txt'),
+        ('🗺️ Генерирую sitemap.xml...',           'fix_sitemap'),
+    ]
+    TRANSLATE_STEPS = [
+        ('🌍 Запускаю переводы...',                'fix_translations'),
+        ('🌐 Добавляю hreflang...',               'fix_hreflang_translated'),
+        ('🔗 Добавляю внутренние ссылки...',       'fix_internal_links'),
+        ('🔗 Обновляю lang switcher...',           'fix_lang_switcher'),
+    ]
+
+    if seo_only:
+        steps = SEO_STEPS
+    elif translate_only:
+        steps = [
+            ('🌍 Запускаю переводы...',            'fix_translations'),
+            ('🌐 Добавляю hreflang...',            'fix_hreflang_translated'),
+            ('🔗 Обновляю lang switcher...',       'fix_lang_switcher'),
+        ]
+    else:
+        steps = SEO_STEPS + TRANSLATE_STEPS
+
+    for step_text, step_key in steps:
+        log.info(f'[archive] step: {step_key}')
+        await bot.edit_message_text(text=step_text, chat_id=_chat_id, message_id=_msg_id)
+        try:
+            progress_cb = None
+            if step_key == 'fix_translations':
+                def progress_cb(done, total, cid=_chat_id, mid=_msg_id):
+                    asyncio.run_coroutine_threadsafe(
+                        bot.edit_message_text(
+                            text=f'🌍 Перевод: {done}/{total} страниц...',
+                            chat_id=cid, message_id=mid,
+                        ), loop
+                    )
+            result = await loop.run_in_executor(
+                None, functools.partial(
+                    run_all_fixes, site_dir, step_key, langs, GROQ_API_KEY,
+                    site_domain, WOWAI_KEY, progress_cb, source_lang, translate_only
+                )
+            )
+            if not result['ok']:
+                log.warning(f'[archive] {step_key}: {result["error"]}')
+        except Exception as e:
+            log.error(f'[archive] step {step_key} failed: {e}')
+
+    audit_after = run_audit_on_dir(site_dir)
+    delta_text = _build_delta_text(audit_before, audit_after)
+    log.info(f'[archive] audit after: {audit_after["failed"]}/{audit_after["total"]} failed')
+
+    # ── Done ──────────────────────────────────────────────────────────────────
+    await bot.edit_message_text(
+        text=(f'✅ *Готово!*\n\n'
+              f'🌐 Сайт обработан: `{archive_domain}`\n'
+              f'📂 SEO-исправления применены.' + delta_text),
+        chat_id=_chat_id, message_id=_msg_id, parse_mode='Markdown'
+    )
+
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    _active_job = None
+    await state.clear()
+
+    if _job_queue:
+        next_job = _job_queue.popleft()
+        await bot.send_message(next_job['chat_id'], '▶️ *Твой сайт начинает обрабатываться!*', parse_mode='Markdown')
+        asyncio.create_task(_process_queued_job(next_job))
+
+
 async def run_fixes(message: Message, state: FSMContext):
     """Run all SEO fixes and create PR."""
     global _active_job, _job_queue
 
     data = await state.get_data()
+    if data.get('source') == 'archive':
+        await _run_archive_fixes(message, state)
+        return
+
     tmp_dir        = data['tmp_dir']
     site_dir       = data.get('site_dir', tmp_dir)
     repo_slug      = data['repo_slug']

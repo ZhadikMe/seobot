@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import json
+import time
 import shutil
 import subprocess
 import urllib.request
@@ -98,19 +99,19 @@ def parse_archive_url(archive_url: str) -> tuple[str, str, str]:
 
 def _cdx_estimate(domain: str, timestamp: str) -> int:
     """
-    Query archive.org CDX API to count unique URLs for this domain in the snapshot year.
+    Query archive.org CDX API to count unique URLs for this domain.
+    No date filter — total unique URL count is a good proxy for site size
+    regardless of which snapshot year we're downloading.
     Returns file count, or 0 on failure.
     """
-    year = timestamp[:4]
     cdx_url = (
         f'https://web.archive.org/cdx/search/cdx'
         f'?url={domain}/*&output=json&fl=urlkey'
-        f'&collapse=urlkey&matchType=domain'
-        f'&from={year}0101&to={year}1231&limit=2000'
+        f'&collapse=urlkey&limit=2000'
     )
     try:
         req = urllib.request.Request(cdx_url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read())
         return max(len(data) - 1, 0)  # subtract header row
     except Exception:
@@ -122,7 +123,7 @@ def _cdx_estimate(domain: str, timestamp: str) -> int:
 # ---------------------------------------------------------------------------
 
 def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_host: str,
-                      total_estimated: int = 0) -> None:
+                      total_estimated: int = 0, progress_cb=None) -> None:
     """
     Run wget to mirror the snapshot into tmp_dir.
     Streams wget output line-by-line to show live download progress.
@@ -139,20 +140,28 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         f'--domains={domains}',
         '--timeout=30',
         '--tries=3',
+        '--reject-regex', r'/(wp-json|wp-admin|wp-login|xmlrpc|feed|rss|sitemap\.xml|\?s=|\?p=|/page/\d)',
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         '-e', 'robots=off',
         f'--directory-prefix={tmp_dir}',
         archive_url,
     ]
 
+    # Time limit: CDX estimate * 10 sec/file * 1.2 buffer, min 30 min, max 3 hours
     if total_estimated:
         est_min = max(1, round(total_estimated * 10 / 60))
-        print(f'Скачиваем {wget_host} (~{total_estimated} файлов, ~{est_min} мин)...')
+        limit_sec = max(1800, int(total_estimated * 10 * 1.2))
+        limit_min = round(limit_sec / 60)
+        print(f'Скачиваем {wget_host} (~{total_estimated} файлов, ~{est_min} мин, лимит {limit_min} мин)...')
     else:
-        print(f'Скачиваем {wget_host}...')
+        est_min = 0
+        limit_sec = 5400  # 90 min default if no CDX estimate
+        print(f'Скачиваем {wget_host} (лимит 90 мин)...')
 
     saved_re = re.compile(r'saved \[')
     count = 0
+    start_time = time.time()
+    timed_out = False
 
     proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True,
                             encoding='utf-8', errors='replace')
@@ -165,8 +174,23 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
                       end='', flush=True)
             else:
                 print(f'\r  Скачано: {count} файлов', end='', flush=True)
+            if progress_cb and count % 10 == 0:
+                try:
+                    progress_cb(count, total_estimated)
+                except Exception:
+                    pass
+
+        if time.time() - start_time > limit_sec:
+            proc.kill()
+            timed_out = True
+            break
+
     proc.wait()
-    print(f'\r  Скачано: {count} файлов — готово.           ')
+    elapsed = round((time.time() - start_time) / 60, 1)
+    if timed_out:
+        print(f'\r  [warn] Лимит времени достигнут ({elapsed} мин) — wget остановлен на {count} файлах')
+    else:
+        print(f'\r  Скачано: {count} файлов за {elapsed} мин.           ')
 
     # wget exits non-zero on partial downloads — that's normal, don't raise
     if proc.returncode not in (0, 8):
@@ -483,7 +507,7 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def pull_snapshot(archive_url: str, target_dir: str) -> str:
+def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None) -> str:
     """
     Full pipeline: parse URL → wget → find root → extract → php→html → fix_archive_scripts.
     Returns target_dir path.
@@ -508,7 +532,7 @@ def pull_snapshot(archive_url: str, target_dir: str) -> str:
         print('CDX недоступен — прогресс без оценки\n')
 
     # 2. Download
-    download_snapshot(archive_url, tmp_dir, domain_no_www, wget_host, total_estimated)
+    download_snapshot(archive_url, tmp_dir, domain_no_www, wget_host, total_estimated, progress_cb)
 
     # 3. Find downloaded root
     try:
