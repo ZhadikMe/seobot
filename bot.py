@@ -428,6 +428,12 @@ def main_keyboard() -> ReplyKeyboardMarkup:
 @dp.message(F.text.regexp(r'https?://github\.com/'))
 async def got_repo(message: Message, state: FSMContext):
     """Accept GitHub URL in any state — auto-reset if needed."""
+    # Don't intercept when archive flow is waiting for target repo
+    current_state = await state.get_state()
+    if current_state == SEOFlow.waiting_target_repo:
+        await got_target_repo(message, state)
+        return
+
     uid = message.from_user.id
 
     # If another user has filled the queue — reject
