@@ -144,9 +144,10 @@ def _cdx_estimate(domain: str, timestamp: str) -> int:
 def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_host: str,
                       total_estimated: int = 0, progress_cb=None) -> None:
     """
-    Two-pass wget download:
-    Pass 1 — HTML pages only (fast, no asset bloat, no time limit).
-    Pass 2 — assets for all downloaded pages (--page-requisites, time-limited).
+    Single-pass wget download: HTML pages + CSS/JS/images together.
+    --page-requisites fetches assets for every page in one run, halving
+    the number of requests to archive.org vs the old two-pass approach
+    (which triggered archive.org IP rate-limiting before pass 2 started).
     """
     domains = f'{domain_no_www},www.{domain_no_www},web.archive.org'
 
@@ -156,8 +157,8 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         f'--domains={domains}',
         '--timeout=30',
         '--tries=3',
-        '--wait=1',           # 1 sec between requests — avoids archive.org rate limiting
-        '--random-wait',      # randomise 0.5x–1.5x wait so it looks less like a bot
+        '--wait=3',           # 3 sec between requests — avoids archive.org rate limiting on cloud IPs
+        '--random-wait',      # randomise 0.5x–1.5x wait (1.5–4.5 sec) so it looks less like a bot
         '--reject-regex', r'/(wp-json|wp-admin|wp-login|xmlrpc|feed|rss|sitemap\.xml|\?s=|\?p=|/page/\d)',
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         '-e', 'robots=off',
@@ -224,45 +225,23 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
             print(f'\n  CSS/images в этом проходе: 0 (скачано только HTML/прочее)')
         return count
 
-    # ── Pass 1: HTML pages only ───────────────────────────────────────────────
-    # Use --reject for binary extensions instead of --accept=html, because
-    # WordPress/CMS pages have extensionless URLs that --accept would block.
-    print('Проход 1/2: страницы...')
-    html_count = _run_wget(
-        extra_flags=[
-            '--recursive', '--level=inf',
-            '--no-page-requisites',
-            '--reject=jpg,jpeg,png,gif,ico,svg,webp,bmp,tiff,'
-                     'css,js,woff,woff2,ttf,eot,otf,'
-                     'mp4,mp3,avi,mov,zip,gz,tar,pdf,doc,docx,xls,xlsx,ppt,pptx',
-        ],
-        phase_limit_sec=max(120, total_estimated * 2) if total_estimated else 900,
-        label='Страниц',
-    )
-    print(f'\r  Страниц скачано: {html_count}              ')
-
-    # Pause between passes — archive.org rate-limits IPs that hit it too fast.
-    # A brief rest lets the server reset its per-IP throttle counter.
-    print('Пауза 15 сек перед pass 2 (anti-rate-limit)...')
-    time.sleep(15)
-
-    # ── Pass 2: assets for all pages ──────────────────────────────────────────
-    print('Проход 2/2: ресурсы...')
-    asset_count = _run_wget(
+    # ── Single pass: HTML + CSS/JS/images together ───────────────────────────
+    # --page-requisites fetches CSS/JS/images for every page it crawls.
+    # Single pass halves the number of requests to archive.org compared to the
+    # old two-pass approach (pass1: pages only, pass2: assets), which was
+    # triggering archive.org IP rate-limiting before pass 2 even started.
+    print('Скачиваем страницы и ресурсы (один проход)...')
+    total_count = _run_wget(
         extra_flags=[
             '--recursive', '--level=inf',
             '--page-requisites',
-            # no --no-clobber: wget must re-visit HTML pages to download their
-            # page-requisites (CSS/JS/images). With --no-clobber wget skips
-            # already-downloaded HTML AND its assets entirely.
         ],
-        phase_limit_sec=asset_limit_sec,  # both passes share start_time → total ≤ limit
-        label='Ресурсов',
-        count_offset=html_count,
+        phase_limit_sec=asset_limit_sec,
+        label='Файлов',
     )
 
     elapsed = round((time.time() - start_time) / 60, 1)
-    print(f'\r  Итого: {html_count + asset_count} файлов за {elapsed} мин.           ')
+    print(f'\r  Итого: {total_count} файлов за {elapsed} мин.           ')
 
     # wget exits non-zero on partial downloads — that's normal, ignore here
 
