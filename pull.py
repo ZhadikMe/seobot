@@ -225,7 +225,9 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         extra_flags=[
             '--recursive', '--level=inf',
             '--page-requisites',
-            '--no-clobber',     # skip already-downloaded HTML from pass 1
+            # no --no-clobber: wget must re-visit HTML pages to download their
+            # page-requisites (CSS/JS/images). With --no-clobber wget skips
+            # already-downloaded HTML AND its assets entirely.
         ],
         phase_limit_sec=asset_limit_sec,  # both passes share start_time → total ≤ limit
         label='Ресурсов',
@@ -309,13 +311,35 @@ def find_site_root(tmp_dir: str, timestamp: str, domain_no_www: str, wget_host: 
 # ---------------------------------------------------------------------------
 
 def _copy_tree_dedup(src_dir: str, dst_dir: str, seen: set, rel_prefix: str = '') -> int:
-    """Recursively copy src_dir into dst_dir, skipping already-seen relative paths."""
-    # A file with this name already exists — can't create a directory here
+    """Recursively copy src_dir into dst_dir, skipping already-seen relative paths.
+
+    Directories are always processed before files so that when wget downloads
+    both an extensionless file (e.g. 'events') AND a directory ('events/')
+    for the same CMS slug, the directory wins.
+
+    If a FILE already exists at dst_dir when we need to create a DIRECTORY
+    (happens when http%3A has an extensionless page and https%3A has a
+    same-named directory with subpages), the file is promoted to become
+    directory/index.html so both the page content and subpages are preserved.
+    """
     if os.path.isfile(dst_dir):
-        return 0
+        # Promote the existing file to directory/index.html
+        tmp_path = dst_dir + '.__promoting__'
+        os.rename(dst_dir, tmp_path)
+        os.makedirs(dst_dir)
+        index_path = os.path.join(dst_dir, 'index.html')
+        if not os.path.exists(index_path):
+            os.rename(tmp_path, index_path)
+            rel_idx = (rel_prefix + '/index.html').lstrip('/')
+            seen.add(rel_idx)
+        else:
+            os.remove(tmp_path)
     os.makedirs(dst_dir, exist_ok=True)
     count = 0
-    for item in os.listdir(src_dir):
+    items = os.listdir(src_dir)
+    # Process directories first so they take precedence over same-named files
+    items.sort(key=lambda x: (0 if os.path.isdir(os.path.join(src_dir, x)) else 1, x))
+    for item in items:
         src = os.path.join(src_dir, item)
         dst = os.path.join(dst_dir, item)
         rel = (rel_prefix + '/' + item).lstrip('/')
@@ -361,36 +385,51 @@ def extract_site(site_root: str, target_dir: str) -> None:
         entry_path = os.path.join(archive_web, entry)
         if not os.path.isdir(entry_path):
             continue
-        domain_subdir = _find_domain_subdir(entry_path, domain_basename)
-        if not domain_subdir or not os.path.isdir(domain_subdir):
-            continue
-        n = _copy_tree_dedup(domain_subdir, target_dir, seen_files)
-        if n:
-            total += n
-            print(f'  Copied {n} files from ts-dir: {entry}')
+        domain_subdirs = _find_domain_subdirs(entry_path, domain_basename)
+        for domain_subdir in domain_subdirs:
+            n = _copy_tree_dedup(domain_subdir, target_dir, seen_files)
+            if n:
+                total += n
+                print(f'  Copied {n} files from ts-dir: {entry} ({os.path.basename(os.path.dirname(domain_subdir))})')
 
     print(f'Extracted {total} total files to: {target_dir}')
 
 
-def _find_domain_subdir(ts_asset_dir: str, domain_basename: str) -> str | None:
-    """Find the domain folder inside a timestamp asset dir.
+def _find_domain_subdirs(ts_asset_dir: str, domain_basename: str) -> list[str]:
+    """Find ALL domain folders inside a timestamp asset dir.
+
+    wget may save http:// and https:// URLs into separate scheme subdirs
+    (http%3A/ and https%3A/ on Windows; http:/ and https:/ on Linux).
+    Both may contain different content (e.g. http has extensionless files,
+    https has subpage directories), so we must return ALL of them.
 
     Handles both Linux wget (http:/ prefix) and Windows wget (http%3A/ prefix).
     """
-    # Direct: tsXX_/domain/
-    direct = os.path.join(ts_asset_dir, domain_basename)
-    if os.path.isdir(direct):
-        return direct
-    # Via scheme prefix — Linux wget uses real colon (http:), Windows URL-encodes it (http%3A)
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        if os.path.isdir(p) and p not in seen:
+            seen.add(p)
+            found.append(p)
+
+    # Direct: tsXX_/domain/ (no scheme prefix)
+    _add(os.path.join(ts_asset_dir, domain_basename))
+
+    # Via scheme prefix — collect ALL matching variants
+    no_www = domain_basename[4:] if domain_basename.startswith('www.') else domain_basename
+    www_variant = 'www.' + no_www
     for scheme in ('http:', 'https:', 'http%3A', 'https%3A'):
-        p = os.path.join(ts_asset_dir, scheme, domain_basename)
-        if os.path.isdir(p):
-            return p
-        # Also try www variant
-        p2 = os.path.join(ts_asset_dir, scheme, 'www.' + domain_basename)
-        if os.path.isdir(p2):
-            return p2
-    return None
+        for host in (domain_basename, no_www, www_variant):
+            _add(os.path.join(ts_asset_dir, scheme, host))
+
+    return found
+
+
+# Keep old name as shim for any callers that expect a single result
+def _find_domain_subdir(ts_asset_dir: str, domain_basename: str) -> str | None:
+    results = _find_domain_subdirs(ts_asset_dir, domain_basename)
+    return results[0] if results else None
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +484,107 @@ def rename_php_to_html(site_dir: str) -> None:
                 fixed_count += 1
 
     print(f'Fixed .php references in {fixed_count} HTML files')
+
+
+# ---------------------------------------------------------------------------
+# Extensionless HTML detection and rename (WordPress / CMS sites)
+# ---------------------------------------------------------------------------
+
+def rename_extensionless_html(site_dir: str) -> None:
+    """
+    WordPress and other CMSes use extensionless URLs like /events/, /galleries/.
+    wget saves these as files with no extension (e.g. 'events', 'galleries').
+    Detect them by checking file content, rename to .html, and update references.
+    """
+    # Extensions we know are not HTML — skip anything that already has these
+    SKIP_EXTS = {
+        '.html', '.htm', '.php', '.css', '.js', '.json', '.xml', '.txt',
+        '.jpg', '.jpeg', '.png', '.gif', '.ico', '.svg', '.webp', '.bmp',
+        '.woff', '.woff2', '.ttf', '.eot', '.otf',
+        '.mp4', '.mp3', '.avi', '.mov', '.pdf', '.zip', '.gz', '.tar',
+        '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    }
+
+    HTML_SIGS = (b'<!DOCTYPE', b'<!doctype', b'<html', b'<HTML')
+
+    renamed: list[tuple[str, str]] = []  # (old_rel_path, new_rel_path)
+
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git']]
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in SKIP_EXTS:
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, 'rb') as f:
+                    header = f.read(64)
+            except OSError:
+                continue
+            # Check if it looks like HTML
+            if not any(header.startswith(sig) for sig in HTML_SIGS):
+                continue
+            new_fname = fname + '.html'
+            new_path = os.path.join(root, new_fname)
+            if os.path.exists(new_path):
+                continue
+            os.rename(fpath, new_path)
+            rel_old = os.path.relpath(fpath, site_dir).replace('\\', '/')
+            rel_new = os.path.relpath(new_path, site_dir).replace('\\', '/')
+            renamed.append((rel_old, rel_new))
+
+    if renamed:
+        print(f'Renamed {len(renamed)} extensionless → .html files')
+
+    # Fix ALL extensionless href links regardless of whether any files were renamed.
+    # Checks what actually exists on disk: if /slug.html exists → /slug.html,
+    # if /slug/ is a directory → /slug/ (trailing slash), otherwise leave as-is.
+    # renamed_basenames kept for reference but disk-check is authoritative.
+    renamed_basenames = {os.path.splitext(os.path.basename(r[1]))[0] for r in renamed}  # noqa
+
+    # Fix ALL extensionless href links: /slug or /slug/ → /slug.html or /slug/
+    # We look at what actually exists on disk to decide which form to use.
+    ref_re = re.compile(
+        r'(href)=(["\'])(/[^"\'?#]*?)(/)?(\2)',
+        re.IGNORECASE
+    )
+
+    def _fix_ref(m):
+        attr, q, path, slash, q2 = m.groups()
+        # Only touch paths whose last segment has no extension
+        bare = path.rstrip('/')
+        seg = bare.split('/')[-1]
+        if '.' in seg:
+            return m.group(0)  # already has extension, leave alone
+        # Resolve to local filesystem path
+        local_as_file = os.path.join(site_dir, bare.lstrip('/').replace('/', os.sep))
+        local_as_dir  = local_as_file  # same path, but we check isdir vs isfile
+        html_file     = local_as_file + '.html'
+        if os.path.isfile(html_file):
+            # Extensionless file was renamed to .html
+            return f'{attr}={q}{bare}.html{q2}'
+        if os.path.isdir(local_as_dir):
+            # It's a directory — ensure trailing slash so web server finds index.html
+            return f'{attr}={q}{bare}/{q2}'
+        # Unknown — leave as-is
+        return m.group(0)
+
+    fixed = 0
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git']]
+        for fname in files:
+            if not fname.lower().endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            with open(fpath, encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            new_content = ref_re.sub(_fix_ref, content)
+            if new_content != content:
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                fixed += 1
+    if fixed:
+        print(f'  Fixed extensionless href links in {fixed} HTML files')
 
 
 # ---------------------------------------------------------------------------
@@ -594,14 +734,14 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
         print(f'Leaving tmp dir intact for inspection: {tmp_dir}')
         raise
 
-    # 3. Extract to target
+    # 4. Extract to target
     extract_site(site_root, target_dir)
 
-    # 4. Cleanup tmp (only after successful extraction)
+    # 5. Cleanup tmp (only after successful extraction)
     shutil.rmtree(tmp_dir, ignore_errors=True)
     print(f'Cleaned up tmp dir: {tmp_dir}')
 
-    # 5. PHP → HTML (only if .php files exist)
+    # 6. PHP → HTML (only if .php files exist)
     php_files = [
         f for root, _, files in os.walk(target_dir)
         for f in files if f.lower().endswith('.php')
@@ -610,12 +750,16 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
         print(f'\nDetected PHP site ({len(php_files)} .php files) — converting...')
         rename_php_to_html(target_dir)
 
-    # 6. Rename files with wget @param suffix → strip params (e.g. main.css@v=1 → main.css)
+    # 6. Rename extensionless HTML files (WordPress /events/, /galleries/, etc.)
+    print('\nDetecting extensionless HTML files...')
+    rename_extensionless_html(target_dir)
+
+    # 7. Rename files with wget @param suffix → strip params (e.g. main.css@v=1 → main.css)
     #    MUST run before fix_archive_scripts so .css files are named correctly when processed
     print('\nFixing wget @param filenames...')
     _fix_wget_param_filenames(target_dir, domain_no_www)
 
-    # 7. Clean archive.org scripts/toolbar/URLs from HTML/CSS
+    # 8. Clean archive.org scripts/toolbar/URLs from HTML/CSS
     print('\nCleaning archive.org artifacts...')
     try:
         import sys as _sys
@@ -626,11 +770,11 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
     except ImportError:
         print('[warn] fixes.py not found — skipping archive cleanup')
 
-    # 8. Convert absolute domain URLs → relative paths in HTML/CSS
+    # 9. Convert absolute domain URLs → relative paths in HTML/CSS
     print('Converting absolute URLs to relative...')
     _fix_absolute_to_relative(target_dir, domain_no_www)
 
-    # 9. Recover any assets still missing after all cleanups
+    # 10. Recover any assets still missing after all cleanups
     print('\nChecking for missing assets...')
     _recover_missing_assets(target_dir, domain_no_www, timestamp)
 

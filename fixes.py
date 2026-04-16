@@ -131,9 +131,16 @@ def fix_archive_scripts(site_dir: str):
                     for pattern in ARCHIVE_SCRIPT_PATTERNS:
                         html = re.sub(pattern, '', html, flags=re.DOTALL | re.IGNORECASE)
 
-                    # /web/TIMESTAMP.../https://domain/path → https://domain/path
+                    # (https://|http://|//)web.archive.org/web/TIMESTAMP.../https://domain/path
+                    # → https://domain/path
                     html = re.sub(
-                        r'(?:https?://web\.archive\.org)?/web/\d{14}[a-z_]*/https?://([^\s"\'<>]+)',
+                        r'(?:https?:)?//web\.archive\.org/web/\d{14}[a-z_]*/https?://([^\s"\'<>]+)',
+                        lambda m: 'https://' + m.group(1),
+                        html
+                    )
+                    # bare /web/TIMESTAMP.../https://domain/path (no host prefix)
+                    html = re.sub(
+                        r'/web/\d{14}[a-z_]*/https?://([^\s"\'<>]+)',
                         lambda m: 'https://' + m.group(1),
                         html
                     )
@@ -143,7 +150,12 @@ def fix_archive_scripts(site_dir: str):
             # (no domain — used in CSS url() and some inline styles)
             if re.search(r'/web/\d{14}[a-z_]*/', html):
                 html = re.sub(
-                    r'(?:https?://web\.archive\.org)?/web/\d{14}[a-z_]*/+(?:https?://[^/\s"\'<>()]+/)?',
+                    r'(?:https?:)?//web\.archive\.org/web/\d{14}[a-z_]*/+(?:https?://[^/\s"\'<>()]+/)?',
+                    '/',
+                    html
+                )
+                html = re.sub(
+                    r'/web/\d{14}[a-z_]*/+(?:https?://[^/\s"\'<>()]+/)?',
                     '/',
                     html
                 )
