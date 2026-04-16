@@ -107,17 +107,18 @@ def parse_archive_url(archive_url: str) -> tuple[str, str, str]:
 def _cdx_estimate(domain: str, timestamp: str) -> int:
     """
     Query archive.org CDX API to count unique URLs for this domain snapshot.
-    First tries with ±1 year date filter around the snapshot timestamp;
-    falls back to no date filter if that returns 0.
+    Uses the snapshot's calendar year (YYYYMMDD format) + statuscode:200 filter.
+    Falls back to all-time query if the year query returns 0.
     Returns file count, or 0 on failure.
     """
-    year = int(timestamp[:4]) if timestamp else 0
+    year = timestamp[:4] if timestamp else ''
 
     def _query(extra: str = '') -> int:
         cdx_url = (
             f'https://web.archive.org/cdx/search/cdx'
             f'?url={domain}/*&output=json&fl=urlkey'
-            f'&collapse=urlkey&limit=2000{extra}'
+            f'&collapse=urlkey&matchType=domain'
+            f'&filter=statuscode:200&limit=1000{extra}'
         )
         try:
             req = urllib.request.Request(cdx_url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -128,7 +129,7 @@ def _cdx_estimate(domain: str, timestamp: str) -> int:
             return 0
 
     if year:
-        count = _query(f'&from={year - 1}&to={year + 1}')
+        count = _query(f'&from={year}0101&to={year}1231')
         if count > 0:
             return count
 
