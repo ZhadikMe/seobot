@@ -427,6 +427,12 @@ def extract_site(site_root: str, target_dir: str, archive_web: str | None = None
             try:
                 children = os.listdir(entry_path)[:6]
                 print(f'  [extract] {entry}: no domain dirs found (has: {children})')
+                # Show one level deeper so we can see what's inside scheme dirs
+                for child in children:
+                    child_path = os.path.join(entry_path, child)
+                    if os.path.isdir(child_path):
+                        grandchildren = os.listdir(child_path)[:8]
+                        print(f'  [extract]   {child}/: {grandchildren}')
             except Exception:
                 pass
         for domain_subdir in domain_subdirs:
