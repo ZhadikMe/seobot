@@ -166,16 +166,17 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         archive_url,
     ]
 
-    # Time limit: CDX estimate * 10 sec/file * 1.2 buffer, min 30 min, max 3 hours
+    # Time limit = displayed estimate * 1.5 + 5 min buffer, min 10 min
     if total_estimated:
-        est_min = max(1, round(total_estimated * 2 / 60))
-        limit_sec = max(1800, int(total_estimated * 10 * 1.5))
+        est_sec  = total_estimated * 2          # same multiplier as display
+        limit_sec = max(600, int(est_sec * 1.5) + 300)
+        est_min  = max(1, round(est_sec / 60))
         limit_min = round(limit_sec / 60)
         print(f'Скачиваем {wget_host} (~{total_estimated} файлов, ~{est_min} мин, лимит {limit_min} мин)...')
     else:
-        est_min = 0
-        limit_sec = 5400  # 90 min default if no CDX estimate
-        print(f'Скачиваем {wget_host} (лимит 90 мин)...')
+        est_min   = 0
+        limit_sec = 1800  # 30 min default if no CDX estimate
+        print(f'Скачиваем {wget_host} (лимит 30 мин)...')
 
     saved_re = re.compile(r'saved \[')
     count = 0
