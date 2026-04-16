@@ -179,6 +179,7 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         cmd = [_get_wget()] + base_flags + extra_flags + [archive_url]
         count = 0
         timed_out = False
+        phase_start = time.time()   # each pass has its own clock
         proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True,
                                 encoding='utf-8', errors='replace')
         for line in proc.stderr:
@@ -191,25 +192,29 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
                         progress_cb(total_done, total_estimated)
                     except Exception:
                         pass
-            if phase_limit_sec and (time.time() - start_time) > phase_limit_sec:
+            if phase_limit_sec and (time.time() - phase_start) > phase_limit_sec:
                 proc.kill()
                 timed_out = True
                 break
         proc.wait()
         if timed_out:
-            elapsed = round((time.time() - start_time) / 60, 1)
+            elapsed = round((time.time() - phase_start) / 60, 1)
             print(f'\r  [warn] Лимит времени ({elapsed} мин) — остановлено на {count} файлах')
         return count
 
     # ── Pass 1: HTML pages only ───────────────────────────────────────────────
+    # Use --reject for binary extensions instead of --accept=html, because
+    # WordPress/CMS pages have extensionless URLs that --accept would block.
     print('Проход 1/2: страницы...')
     html_count = _run_wget(
         extra_flags=[
             '--recursive', '--level=inf',
             '--no-page-requisites',
-            '--accept=html,htm,php,asp,aspx',
+            '--reject=jpg,jpeg,png,gif,ico,svg,webp,bmp,tiff,'
+                     'css,js,woff,woff2,ttf,eot,otf,'
+                     'mp4,mp3,avi,mov,zip,gz,tar,pdf,doc,docx,xls,xlsx,ppt,pptx',
         ],
-        phase_limit_sec=1800,   # 30 min max for pages (should finish in 2-5 min)
+        phase_limit_sec=max(120, total_estimated * 2) if total_estimated else 900,
         label='Страниц',
     )
     print(f'\r  Страниц скачано: {html_count}              ')
@@ -222,7 +227,7 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
             '--page-requisites',
             '--no-clobber',     # skip already-downloaded HTML from pass 1
         ],
-        phase_limit_sec=asset_limit_sec,
+        phase_limit_sec=asset_limit_sec,  # both passes share start_time → total ≤ limit
         label='Ресурсов',
         count_offset=html_count,
     )
