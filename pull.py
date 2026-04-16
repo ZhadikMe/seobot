@@ -528,10 +528,14 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None) -> str:
+def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
+                  total_estimated: int = 0) -> str:
     """
     Full pipeline: parse URL → wget → find root → extract → php→html → fix_archive_scripts.
     Returns target_dir path.
+
+    total_estimated: pre-computed CDX count (pass from bot to avoid a second CDX call).
+                     If 0, will query CDX here (used when called from CLI).
     """
     timestamp, domain_no_www, wget_host = parse_archive_url(archive_url)
     print(f'\n{"="*60}')
@@ -543,9 +547,10 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None) -> str:
 
     tmp_dir = target_dir.rstrip('/\\') + '_wget_tmp'
 
-    # 1. CDX estimate (best-effort — used only for progress display)
-    print('Запрашиваем CDX для оценки размера сайта...')
-    total_estimated = _cdx_estimate(domain_no_www, timestamp)
+    # 1. CDX estimate — only query if not already provided by bot
+    if not total_estimated:
+        print('Запрашиваем CDX для оценки размера сайта...')
+        total_estimated = _cdx_estimate(domain_no_www, timestamp)
     if total_estimated:
         est_min = max(1, round(total_estimated * 10 / 60))
         print(f'CDX: ~{total_estimated} уникальных URL, ожидаемое время ~{est_min} мин\n')
@@ -609,8 +614,10 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None) -> str:
 
 def _fix_wget_param_filenames(site_dir: str, domain: str) -> None:
     """
-    wget saves 'file.css?v=1' as 'file.css@v=1'.
-    Rename these files to strip the @param suffix, and update references in HTML/CSS.
+    wget saves query-param filenames differently per OS:
+      Windows: 'file.css?v=1' → 'file.css@v=1'  (? replaced with @)
+      Linux:   'file.css?v=1' → 'file.css?v=1'  (? kept as-is, valid on Linux fs)
+    Rename these files to strip the param suffix, and update references in HTML/CSS.
     """
     renames: dict[str, str] = {}  # old_name → new_name (basename only)
 
@@ -618,18 +625,27 @@ def _fix_wget_param_filenames(site_dir: str, domain: str) -> None:
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in ['.git']]
         for fname in files:
+            # Detect separator: @ (Windows wget) or ? (Linux wget)
+            sep = None
             if '@' in fname:
-                new_fname = fname.split('@')[0]  # strip @param part
-                src = os.path.join(root, fname)
-                dst = os.path.join(root, new_fname)
-                if not os.path.exists(dst):
-                    os.rename(src, dst)
-                    renames[fname] = new_fname
-                else:
-                    os.remove(src)  # duplicate, remove @param version
+                sep = '@'
+            elif '?' in fname:
+                sep = '?'
+            if sep is None:
+                continue
+            new_fname = fname.split(sep)[0]  # strip @param or ?param part
+            if not new_fname:
+                continue
+            src = os.path.join(root, fname)
+            dst = os.path.join(root, new_fname)
+            if not os.path.exists(dst):
+                os.rename(src, dst)
+                renames[fname] = new_fname
+            else:
+                os.remove(src)  # duplicate, remove param version
 
     if renames:
-        print(f'  Renamed {len(renames)} files (stripped @param suffix)')
+        print(f'  Renamed {len(renames)} files (stripped query-param suffix)')
 
     # Pass 2: fix references in HTML and CSS files
     # Build replacement pattern: old filenames (with ? or @ variants) → new name

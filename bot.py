@@ -1029,7 +1029,8 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
     from pull import pull_snapshot
     try:
         site_dir = await loop.run_in_executor(
-            None, functools.partial(pull_snapshot, archive_url, tmp_dir, pull_progress_cb)
+            None, functools.partial(pull_snapshot, archive_url, tmp_dir, pull_progress_cb,
+                                    archive_total)
         )
     except Exception as e:
         log.error(f'[archive] pull_snapshot failed: {e}')
@@ -1486,12 +1487,13 @@ async def create_pull_request(
             log.error(f'git clone failed: {result.stderr}')
             return None
 
-        # ── Check if repo is empty (no commits yet) ────────────────────────────
-        rev_check = subprocess.run(
-            ['git', 'rev-parse', 'HEAD'],
+        # ── Check if base_branch exists in remote ─────────────────────────────
+        # Repo may have commits on other branches but no main/master yet
+        base_check = subprocess.run(
+            ['git', 'ls-remote', '--exit-code', '--heads', 'origin', base_branch],
             cwd=clone_dir, capture_output=True, text=True
         )
-        repo_is_empty = rev_check.returncode != 0
+        repo_is_empty = base_check.returncode != 0  # base branch doesn't exist
 
         # ── Copy translated site files into clone ──────────────────────────────
         SKIP_EXTENSIONS = {'.zip', '.tar', '.gz', '.rar', '.7z', '.mp4', '.mp3', '.mov', '.avi'}
