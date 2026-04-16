@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import shutil
 import re
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -1010,19 +1011,40 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
 
     log.info(f'[archive] pull_snapshot start: {archive_url}')
 
-    _last_cb = [0.0]
+    _last_cb    = [0.0]
+    _last_count = [0]
+    _dl_start   = [time.time()]
 
     def pull_progress_cb(done, total, chat_id=_chat_id, msg_id=_msg_id):
-        import time as _t
-        now = _t.time()
-        if now - _last_cb[0] < 4:
+        now = time.time()
+        if now - _last_cb[0] < 10:   # update every 10 sec
             return
-        _last_cb[0] = now
-        if total and done <= total:
-            pct = done * 100 // total
-            text = f'📥 Скачиваю: {done}/{total} [{pct}%]...'
+
+        elapsed     = now - _dl_start[0]          # seconds since start
+        interval    = now - _last_cb[0]            # seconds since last callback
+        delta       = done - _last_count[0]        # files downloaded in this interval
+
+        _last_cb[0]    = now
+        _last_count[0] = done
+
+        elapsed_min = round(elapsed / 60, 1)
+
+        # Speed: files per minute (based on this interval for responsiveness)
+        speed_fpm = delta / (interval / 60) if interval > 0 else 0
+
+        # Dynamic ETA: if speed is known and download still active, estimate remaining
+        if speed_fpm > 0 and elapsed > 20:
+            # Assume download will slow down as pages run out — use 1.5x current count
+            # as soft estimate of total if we've exceeded CDX estimate
+            soft_total = max(total or 0, int(done * 1.3))
+            remaining_files = max(0, soft_total - done)
+            eta_min = round(remaining_files / speed_fpm, 1)
+            text = (f'📥 Скачиваю: {done} файлов...\n'
+                    f'⏱ {elapsed_min} мин прошло · ~{round(speed_fpm)} файл/мин · '
+                    f'ещё ≈{eta_min} мин')
         else:
-            text = f'📥 Скачиваю: {done} файлов...'
+            text = f'📥 Скачиваю: {done} файлов... ⏱ {elapsed_min} мин'
+
         asyncio.run_coroutine_threadsafe(
             bot.edit_message_text(text=text, chat_id=chat_id, message_id=msg_id),
             loop
