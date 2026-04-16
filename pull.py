@@ -436,6 +436,15 @@ def extract_site(site_root: str, target_dir: str, archive_web: str | None = None
             except Exception:
                 pass
         for domain_subdir in domain_subdirs:
+            # Log root-level contents so we can diagnose missing index.html
+            try:
+                root_items = sorted(os.listdir(domain_subdir))
+                root_files = [x for x in root_items if os.path.isfile(os.path.join(domain_subdir, x))]
+                root_dirs  = [x for x in root_items if os.path.isdir(os.path.join(domain_subdir, x))]
+                print(f'  [extract] {entry}/{os.path.relpath(domain_subdir, entry_path)}: '
+                      f'root files={root_files[:10]}, root dirs={root_dirs[:10]}')
+            except Exception:
+                pass
             n = _copy_tree_dedup(domain_subdir, target_dir, seen_files)
             print(f'  [extract] {entry}/{os.path.relpath(domain_subdir, entry_path)}: copied {n} files')
             total += n
@@ -713,7 +722,18 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
     print('  Пауза 10 сек перед recover (anti-rate-limit)...')
     time.sleep(10)
 
-    for abs_path in sorted(missing):
+    # Sort by priority: uploads/ and themes/ first (real site content),
+    # plugins/ last (third-party assets frequently not archived → waste requests)
+    def _recover_priority(path: str) -> int:
+        if '/wp-content/uploads/' in path:
+            return 0
+        if '/wp-content/themes/' in path:
+            return 1
+        if '/wp-content/plugins/' in path:
+            return 3
+        return 2
+
+    for abs_path in sorted(missing, key=_recover_priority):
         local_path = os.path.join(site_dir, abs_path.lstrip('/').replace('/', os.sep))
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
@@ -731,11 +751,11 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
                         f.write(data)
                     recovered += 1
                     downloaded = True
-                    time.sleep(0.5)  # polite pause between successful downloads
+                    time.sleep(4)  # match wget --wait=3 pace to avoid archive.org rate limit
                     break
                 except Exception as e:
                     print(f'  [recover] {url}: {e}')
-                    time.sleep(1.0)  # wait longer on error before retrying
+                    time.sleep(4)  # same pace on error
                     continue
             if downloaded:
                 break
