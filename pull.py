@@ -144,17 +144,14 @@ def _cdx_estimate(domain: str, timestamp: str) -> int:
 def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_host: str,
                       total_estimated: int = 0, progress_cb=None) -> None:
     """
-    Run wget to mirror the snapshot into tmp_dir.
-    Streams wget output line-by-line to show live download progress.
+    Two-pass wget download:
+    Pass 1 — HTML pages only (fast, no asset bloat, no time limit).
+    Pass 2 — assets for all downloaded pages (--page-requisites, time-limited).
     """
     domains = f'{domain_no_www},www.{domain_no_www},web.archive.org'
 
-    cmd = [
-        _get_wget(),
-        '--recursive',
-        '--level=inf',
-        '--page-requisites',
-        '--no-convert-links',   # keep original archive.org URLs; fix_archive_scripts cleans them
+    base_flags = [
+        '--no-convert-links',
         '--span-hosts',
         f'--domains={domains}',
         '--timeout=30',
@@ -163,58 +160,77 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         '-e', 'robots=off',
         f'--directory-prefix={tmp_dir}',
-        archive_url,
     ]
 
-    # Time limit = displayed estimate * 1.5 + 5 min buffer, min 10 min
+    # Asset time limit: estimate * 1.5 + 5 min buffer, min 10 min
     if total_estimated:
-        est_sec  = total_estimated * 2          # same multiplier as display
-        limit_sec = max(600, int(est_sec * 1.5) + 300)
-        est_min  = max(1, round(est_sec / 60))
-        limit_min = round(limit_sec / 60)
-        print(f'Скачиваем {wget_host} (~{total_estimated} файлов, ~{est_min} мин, лимит {limit_min} мин)...')
+        asset_limit_sec = max(600, int(total_estimated * 2 * 1.5) + 300)
+        print(f'Скачиваем {wget_host} (лимит ресурсов {round(asset_limit_sec/60)} мин)...')
     else:
-        est_min   = 0
-        limit_sec = 1800  # 30 min default if no CDX estimate
-        print(f'Скачиваем {wget_host} (лимит 30 мин)...')
+        asset_limit_sec = 1800  # 30 min default
+        print(f'Скачиваем {wget_host} (лимит ресурсов 30 мин)...')
 
     saved_re = re.compile(r'saved \[')
-    count = 0
     start_time = time.time()
-    timed_out = False
 
-    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True,
-                            encoding='utf-8', errors='replace')
-    for line in proc.stderr:
-        if saved_re.search(line):
-            count += 1
-            if total_estimated and count <= total_estimated:
-                pct = count * 100 // total_estimated
-                print(f'\r  Скачано: {count}/{total_estimated} [{pct}%]',
-                      end='', flush=True)
-            else:
-                print(f'\r  Скачано: {count} файлов', end='', flush=True)
-            if progress_cb and count % 10 == 0:
-                try:
-                    progress_cb(count, total_estimated)
-                except Exception:
-                    pass
+    def _run_wget(extra_flags: list, phase_limit_sec: float | None,
+                  label: str, count_offset: int = 0) -> int:
+        """Run wget with extra_flags, return number of files saved."""
+        cmd = [_get_wget()] + base_flags + extra_flags + [archive_url]
+        count = 0
+        timed_out = False
+        proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True,
+                                encoding='utf-8', errors='replace')
+        for line in proc.stderr:
+            if saved_re.search(line):
+                count += 1
+                total_done = count_offset + count
+                print(f'\r  {label}: {count} файлов', end='', flush=True)
+                if progress_cb and total_done % 10 == 0:
+                    try:
+                        progress_cb(total_done, total_estimated)
+                    except Exception:
+                        pass
+            if phase_limit_sec and (time.time() - start_time) > phase_limit_sec:
+                proc.kill()
+                timed_out = True
+                break
+        proc.wait()
+        if timed_out:
+            elapsed = round((time.time() - start_time) / 60, 1)
+            print(f'\r  [warn] Лимит времени ({elapsed} мин) — остановлено на {count} файлах')
+        return count
 
-        if time.time() - start_time > limit_sec:
-            proc.kill()
-            timed_out = True
-            break
+    # ── Pass 1: HTML pages only ───────────────────────────────────────────────
+    print('Проход 1/2: страницы...')
+    html_count = _run_wget(
+        extra_flags=[
+            '--recursive', '--level=inf',
+            '--no-page-requisites',
+            '--accept=html,htm,php,asp,aspx',
+        ],
+        phase_limit_sec=1800,   # 30 min max for pages (should finish in 2-5 min)
+        label='Страниц',
+    )
+    print(f'\r  Страниц скачано: {html_count}              ')
 
-    proc.wait()
+    # ── Pass 2: assets for all pages ──────────────────────────────────────────
+    print('Проход 2/2: ресурсы...')
+    asset_count = _run_wget(
+        extra_flags=[
+            '--recursive', '--level=inf',
+            '--page-requisites',
+            '--no-clobber',     # skip already-downloaded HTML from pass 1
+        ],
+        phase_limit_sec=asset_limit_sec,
+        label='Ресурсов',
+        count_offset=html_count,
+    )
+
     elapsed = round((time.time() - start_time) / 60, 1)
-    if timed_out:
-        print(f'\r  [warn] Лимит времени достигнут ({elapsed} мин) — wget остановлен на {count} файлах')
-    else:
-        print(f'\r  Скачано: {count} файлов за {elapsed} мин.           ')
+    print(f'\r  Итого: {html_count + asset_count} файлов за {elapsed} мин.           ')
 
-    # wget exits non-zero on partial downloads — that's normal, don't raise
-    if proc.returncode not in (0, 8):
-        print(f'[warn] wget завершился с кодом {proc.returncode} (обычно не критично)')
+    # wget exits non-zero on partial downloads — that's normal, ignore here
 
 
 # ---------------------------------------------------------------------------
