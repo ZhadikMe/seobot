@@ -156,6 +156,8 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         f'--domains={domains}',
         '--timeout=30',
         '--tries=3',
+        '--wait=1',           # 1 sec between requests — avoids archive.org rate limiting
+        '--random-wait',      # randomise 0.5x–1.5x wait so it looks less like a bot
         '--reject-regex', r'/(wp-json|wp-admin|wp-login|xmlrpc|feed|rss|sitemap\.xml|\?s=|\?p=|/page/\d)',
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         '-e', 'robots=off',
@@ -238,6 +240,11 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         label='Страниц',
     )
     print(f'\r  Страниц скачано: {html_count}              ')
+
+    # Pause between passes — archive.org rate-limits IPs that hit it too fast.
+    # A brief rest lets the server reset its per-IP throttle counter.
+    print('Пауза 15 сек перед pass 2 (anti-rate-limit)...')
+    time.sleep(15)
 
     # ── Pass 2: assets for all pages ──────────────────────────────────────────
     print('Проход 2/2: ресурсы...')
@@ -717,6 +724,10 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
     www_domain = f'www.{domain_no_www}' if not domain_no_www.startswith('www.') else domain_no_www
     domain_variants = [domain_no_www, www_domain] if www_domain != domain_no_www else [domain_no_www]
 
+    # Brief pause before starting recovery — wget may have triggered rate limiting
+    print('  Пауза 10 сек перед recover (anti-rate-limit)...')
+    time.sleep(10)
+
     for abs_path in sorted(missing):
         local_path = os.path.join(site_dir, abs_path.lstrip('/').replace('/', os.sep))
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -735,9 +746,11 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
                         f.write(data)
                     recovered += 1
                     downloaded = True
+                    time.sleep(0.5)  # polite pause between successful downloads
                     break
                 except Exception as e:
                     print(f'  [recover] {url}: {e}')
+                    time.sleep(1.0)  # wait longer on error before retrying
                     continue
             if downloaded:
                 break
