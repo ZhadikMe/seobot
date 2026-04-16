@@ -673,10 +673,27 @@ async def _show_archive_confirm(message_or_callback, state: FSMContext):
     langs = sorted(data.get('selected_langs', []))
 
     if total:
-        est_min = max(1, round(total * 2 / 60))
-        time_str = f'≈{est_min} мин скачивания + обработка'
+        # Download: show limit (guaranteed max), same formula as wget timeout
+        dl_limit_sec = max(600, int(total * 2 * 1.5) + 300)
+        dl_limit_min = round(dl_limit_sec / 60)
+        time_parts = [f'📥 Скачивание: не более {dl_limit_min} мин']
+
+        # SEO fixes: ~2 min regardless of size
+        if mode != 'translate_only':
+            time_parts.append('🔧 SEO-исправления: ~2 мин')
+
+        # Translation: CDX pages × langs × 1 sec per page
+        if mode in ('full', 'translate_only') and langs:
+            tr_sec = total * len(langs) * 1
+            tr_min = max(1, round(tr_sec / 60))
+            time_parts.append(f'🌍 Перевод ({len(langs)} яз.): ~{tr_min} мин')
+
+        # Total
+        total_min = dl_limit_min + (2 if mode != 'translate_only' else 0) + (tr_min if mode in ('full', 'translate_only') and langs else 0)
+        time_parts.append(f'⏳ Итого: не более ~{total_min} мин')
+        time_str = '\n'.join(time_parts)
     else:
-        time_str = 'время скачивания неизвестно'
+        time_str = '⏱ Время скачивания неизвестно'
 
     mode_labels = {
         'full': '🔧 SEO + перевод',
@@ -1011,40 +1028,17 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
 
     log.info(f'[archive] pull_snapshot start: {archive_url}')
 
-    _last_cb    = [0.0]
-    _last_count = [0]
-    _dl_start   = [time.time()]
+    _last_cb  = [0.0]
+    _dl_start = [time.time()]
+    dl_limit_min = round(max(600, int(archive_total * 2 * 1.5) + 300) / 60) if archive_total else 30
 
     def pull_progress_cb(done, total, chat_id=_chat_id, msg_id=_msg_id):
         now = time.time()
-        if now - _last_cb[0] < 10:   # update every 10 sec
+        if now - _last_cb[0] < 10:
             return
-
-        elapsed     = now - _dl_start[0]          # seconds since start
-        interval    = now - _last_cb[0]            # seconds since last callback
-        delta       = done - _last_count[0]        # files downloaded in this interval
-
-        _last_cb[0]    = now
-        _last_count[0] = done
-
-        elapsed_min = round(elapsed / 60, 1)
-
-        # Speed: files per minute (based on this interval for responsiveness)
-        speed_fpm = delta / (interval / 60) if interval > 0 else 0
-
-        # Dynamic ETA: if speed is known and download still active, estimate remaining
-        if speed_fpm > 0 and elapsed > 20:
-            # Assume download will slow down as pages run out — use 1.5x current count
-            # as soft estimate of total if we've exceeded CDX estimate
-            soft_total = max(total or 0, int(done * 1.3))
-            remaining_files = max(0, soft_total - done)
-            eta_min = round(remaining_files / speed_fpm, 1)
-            text = (f'📥 Скачиваю: {done} файлов...\n'
-                    f'⏱ {elapsed_min} мин прошло · ~{round(speed_fpm)} файл/мин · '
-                    f'ещё ≈{eta_min} мин')
-        else:
-            text = f'📥 Скачиваю: {done} файлов... ⏱ {elapsed_min} мин'
-
+        _last_cb[0] = now
+        elapsed_min = round((now - _dl_start[0]) / 60, 1)
+        text = f'📥 Скачиваю: {done} файлов... ⏱ {elapsed_min} / {dl_limit_min} мин'
         asyncio.run_coroutine_threadsafe(
             bot.edit_message_text(text=text, chat_id=chat_id, message_id=msg_id),
             loop

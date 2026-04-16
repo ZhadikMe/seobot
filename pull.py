@@ -289,6 +289,9 @@ def find_site_root(tmp_dir: str, timestamp: str, domain_no_www: str, wget_host: 
 
 def _copy_tree_dedup(src_dir: str, dst_dir: str, seen: set, rel_prefix: str = '') -> int:
     """Recursively copy src_dir into dst_dir, skipping already-seen relative paths."""
+    # A file with this name already exists — can't create a directory here
+    if os.path.isfile(dst_dir):
+        return 0
     os.makedirs(dst_dir, exist_ok=True)
     count = 0
     for item in os.listdir(src_dir):
@@ -298,7 +301,7 @@ def _copy_tree_dedup(src_dir: str, dst_dir: str, seen: set, rel_prefix: str = ''
         if os.path.isdir(src):
             count += _copy_tree_dedup(src, dst, seen, rel)
         else:
-            if rel not in seen:
+            if rel not in seen and not os.path.isdir(dst):
                 shutil.copy2(src, dst)
                 seen.add(rel)
                 count += 1
