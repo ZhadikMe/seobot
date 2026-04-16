@@ -1486,6 +1486,13 @@ async def create_pull_request(
             log.error(f'git clone failed: {result.stderr}')
             return None
 
+        # ── Check if repo is empty (no commits yet) ────────────────────────────
+        rev_check = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=clone_dir, capture_output=True, text=True
+        )
+        repo_is_empty = rev_check.returncode != 0
+
         # ── Copy translated site files into clone ──────────────────────────────
         SKIP_EXTENSIONS = {'.zip', '.tar', '.gz', '.rar', '.7z', '.mp4', '.mp3', '.mov', '.avi'}
         copied = 0
@@ -1509,9 +1516,15 @@ async def create_pull_request(
         subprocess.run(['git', 'config', 'user.name', 'SEO Bot'],
                        cwd=clone_dir, capture_output=True)
 
-        # ── Commit on new branch ───────────────────────────────────────────────
-        subprocess.run(['git', 'checkout', '-b', branch_name],
-                       cwd=clone_dir, capture_output=True)
+        # ── Commit ────────────────────────────────────────────────────────────
+        if repo_is_empty:
+            # Empty repo: push directly to base_branch (no PR possible without base)
+            subprocess.run(['git', 'checkout', '-b', base_branch],
+                           cwd=clone_dir, capture_output=True)
+        else:
+            subprocess.run(['git', 'checkout', '-b', branch_name],
+                           cwd=clone_dir, capture_output=True)
+
         subprocess.run(['git', 'add', '-A'],
                        cwd=clone_dir, capture_output=True)
 
@@ -1531,16 +1544,26 @@ async def create_pull_request(
                 return None
 
         # ── Push ───────────────────────────────────────────────────────────────
-        log.info(f'Pushing branch {branch_name}...')
+        push_branch = base_branch if repo_is_empty else branch_name
+        log.info(f'Pushing branch {push_branch}...')
+        push_cmd = ['git', 'push', 'origin', push_branch]
+        if repo_is_empty:
+            push_cmd.append('--set-upstream')
         result = subprocess.run(
-            ['git', 'push', 'origin', branch_name],
-            cwd=clone_dir, capture_output=True, text=True, timeout=120
+            push_cmd, cwd=clone_dir, capture_output=True, text=True, timeout=120
         )
         if result.returncode != 0:
             log.error(f'git push failed: {result.stderr}')
             return None
 
-        log.info(f'Push OK — creating PR...')
+        log.info(f'Push OK')
+
+        # ── If repo was empty, no PR possible — return repo URL ────────────────
+        if repo_is_empty:
+            log.info(f'Repo was empty — pushed {copied} files directly to {base_branch}')
+            return f'https://github.com/{repo_slug}/tree/{base_branch}'
+
+        log.info('Creating PR...')
 
         # ── Create PR via API ──────────────────────────────────────────────────
         pr = gh_repo.create_pull(

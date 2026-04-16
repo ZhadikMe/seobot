@@ -346,13 +346,16 @@ def extract_site(site_root: str, target_dir: str) -> None:
 
 
 def _find_domain_subdir(ts_asset_dir: str, domain_basename: str) -> str | None:
-    """Find the domain folder inside a timestamp asset dir (handles http%3A/ prefix)."""
+    """Find the domain folder inside a timestamp asset dir.
+
+    Handles both Linux wget (http:/ prefix) and Windows wget (http%3A/ prefix).
+    """
     # Direct: tsXX_/domain/
     direct = os.path.join(ts_asset_dir, domain_basename)
     if os.path.isdir(direct):
         return direct
-    # Via scheme prefix: tsXX_/http%3A/domain/ or tsXX_/https%3A/domain/
-    for scheme in ('http%3A', 'https%3A'):
+    # Via scheme prefix — Linux wget uses real colon (http:), Windows URL-encodes it (http%3A)
+    for scheme in ('http:', 'https:', 'http%3A', 'https%3A'):
         p = os.path.join(ts_asset_dir, scheme, domain_basename)
         if os.path.isdir(p):
             return p
