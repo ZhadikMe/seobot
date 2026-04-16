@@ -168,7 +168,7 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
 
     # Time limit: CDX estimate * 10 sec/file * 1.2 buffer, min 30 min, max 3 hours
     if total_estimated:
-        est_min = max(1, round(total_estimated * 10 / 60))
+        est_min = max(1, round(total_estimated * 2 / 60))
         limit_sec = max(1800, int(total_estimated * 10 * 1.5))
         limit_min = round(limit_sec / 60)
         print(f'Скачиваем {wget_host} (~{total_estimated} файлов, ~{est_min} мин, лимит {limit_min} мин)...')
@@ -187,8 +187,8 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
     for line in proc.stderr:
         if saved_re.search(line):
             count += 1
-            if total_estimated:
-                pct = min(count * 100 // total_estimated, 99)
+            if total_estimated and count <= total_estimated:
+                pct = count * 100 // total_estimated
                 print(f'\r  Скачано: {count}/{total_estimated} [{pct}%]',
                       end='', flush=True)
             else:
@@ -553,7 +553,7 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
         print('Запрашиваем CDX для оценки размера сайта...')
         total_estimated = _cdx_estimate(domain_no_www, timestamp)
     if total_estimated:
-        est_min = max(1, round(total_estimated * 10 / 60))
+        est_min = max(1, round(total_estimated * 2 / 60))
         print(f'CDX: ~{total_estimated} уникальных URL, ожидаемое время ~{est_min} мин\n')
     else:
         print('CDX недоступен — прогресс без оценки\n')

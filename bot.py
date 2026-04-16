@@ -253,7 +253,7 @@ async def got_archive_url(message: Message, state: FSMContext):
     total = await loop.run_in_executor(None, _cdx_estimate, domain, timestamp)
 
     if total:
-        est_min = max(1, round(total * 10 / 60))
+        est_min = max(1, round(total * 2 / 60))
         est_text = f'~{total} страниц → ≈{est_min} мин скачивания'
     else:
         est_min = 0
@@ -672,7 +672,7 @@ async def _show_archive_confirm(message_or_callback, state: FSMContext):
     langs = sorted(data.get('selected_langs', []))
 
     if total:
-        est_min = max(1, round(total * 10 / 60))
+        est_min = max(1, round(total * 2 / 60))
         time_str = f'≈{est_min} мин скачивания + обработка'
     else:
         time_str = 'время скачивания неизвестно'
@@ -997,7 +997,7 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
 
     # ── Phase 1: download from archive ────────────────────────────────────────
     if archive_total:
-        est_min = max(1, round(archive_total * 10 / 60))
+        est_min = max(1, round(archive_total * 2 / 60))
         dl_text = (f'📥 Скачиваю сайт из веб-архива...\n'
                    f'🌐 `{archive_domain}`\n'
                    f'📊 ~{archive_total} файлов, ≈{est_min} мин')
@@ -1018,8 +1018,8 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
         if now - _last_cb[0] < 4:
             return
         _last_cb[0] = now
-        if total:
-            pct = min(done * 100 // total, 99)
+        if total and done <= total:
+            pct = done * 100 // total
             text = f'📥 Скачиваю: {done}/{total} [{pct}%]...'
         else:
             text = f'📥 Скачиваю: {done} файлов...'
@@ -1103,6 +1103,19 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
         try:
             progress_cb = None
             if step_key == 'fix_translations':
+                # Show translation time estimate before starting
+                html_count = sum(
+                    1 for _, _, fs in os.walk(site_dir)
+                    for f in fs if f.endswith('.html')
+                )
+                lang_count = len(langs) if langs else 0
+                if html_count and lang_count:
+                    tr_min = max(1, round(html_count * lang_count * 2 / 60))
+                    tr_text = f'🌍 Переводим на {lang_count} язык(а)... ~{html_count} стр. × {lang_count} яз. ≈ {tr_min} мин'
+                else:
+                    tr_text = '🌍 Запускаю переводы...'
+                await bot.edit_message_text(text=tr_text, chat_id=_chat_id, message_id=_msg_id)
+
                 def progress_cb(done, total, cid=_chat_id, mid=_msg_id):
                     asyncio.run_coroutine_threadsafe(
                         bot.edit_message_text(
@@ -1254,6 +1267,15 @@ async def run_fixes(message: Message, state: FSMContext):
             if step_key == 'fix_translations':
                 _chat_id = message.chat.id
                 _msg_id = status.message_id
+                html_count = sum(
+                    1 for _, _, fs in os.walk(site_dir)
+                    for f in fs if f.endswith('.html')
+                )
+                lang_count = len(langs) if langs else 0
+                if html_count and lang_count:
+                    tr_min = max(1, round(html_count * lang_count * 2 / 60))
+                    tr_text = f'🌍 Переводим на {lang_count} язык(а)... ~{html_count} стр. × {lang_count} яз. ≈ {tr_min} мин'
+                    await bot.edit_message_text(text=tr_text, chat_id=_chat_id, message_id=_msg_id)
                 def progress_cb(done, total, chat_id=_chat_id, msg_id=_msg_id):
                     asyncio.run_coroutine_threadsafe(
                         bot.edit_message_text(
