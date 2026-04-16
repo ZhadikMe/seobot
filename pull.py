@@ -177,21 +177,31 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
                   label: str, count_offset: int = 0) -> int:
         """Run wget with extra_flags, return number of files saved."""
         cmd = [_get_wget()] + base_flags + extra_flags + [archive_url]
+        print(f'  wget cmd: {" ".join(cmd[:8])} ...')  # log first 8 args for debugging
         count = 0
         timed_out = False
         phase_start = time.time()   # each pass has its own clock
         proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True,
                                 encoding='utf-8', errors='replace')
+        saved_files: list[str] = []
+        error_re = re.compile(r'ERROR\s+\d+|failed:|Unable to|cannot open', re.IGNORECASE)
         for line in proc.stderr:
-            if saved_re.search(line):
+            line_s = line.rstrip()
+            if saved_re.search(line_s):
                 count += 1
                 total_done = count_offset + count
+                # Extract saved filename for logging
+                fname_m = re.search(r'"([^"]+)"', line_s)
+                if fname_m:
+                    saved_files.append(fname_m.group(1))
                 print(f'\r  {label}: {count} файлов', end='', flush=True)
                 if progress_cb and total_done % 10 == 0:
                     try:
                         progress_cb(total_done, total_estimated)
                     except Exception:
                         pass
+            elif error_re.search(line_s):
+                print(f'\n  [wget error] {line_s}')
             if phase_limit_sec and (time.time() - phase_start) > phase_limit_sec:
                 proc.kill()
                 timed_out = True
@@ -200,6 +210,16 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         if timed_out:
             elapsed = round((time.time() - phase_start) / 60, 1)
             print(f'\r  [warn] Лимит времени ({elapsed} мин) — остановлено на {count} файлах')
+        # Log sample of what was saved (useful for diagnosing missing CSS/images)
+        css_saved = [f for f in saved_files if f.endswith(('.css', '.js', '.png', '.jpg', '.svg'))]
+        if css_saved:
+            print(f'\n  Примеры скачанных ресурсов ({len(css_saved)}):')
+            for f in css_saved[:10]:
+                print(f'    {f}')
+            if len(css_saved) > 10:
+                print(f'    ... и ещё {len(css_saved) - 10}')
+        elif count > 0:
+            print(f'\n  CSS/images в этом проходе: 0 (скачано только HTML/прочее)')
         return count
 
     # ── Pass 1: HTML pages only ───────────────────────────────────────────────
@@ -260,6 +280,8 @@ def find_site_root(tmp_dir: str, timestamp: str, domain_no_www: str, wget_host: 
 
     # Collect all timestamp subdirs, newest first
     ts_dirs = sorted(os.listdir(archive_base), reverse=True)
+    print(f'[find_site_root] archive_base={archive_base}')
+    print(f'[find_site_root] ts_dirs: {ts_dirs[:5]}')
 
     for ts_dir in ts_dirs:
         # Only look in the pure timestamp dir (not css_/js_/im_ variants)
@@ -269,13 +291,20 @@ def find_site_root(tmp_dir: str, timestamp: str, domain_no_www: str, wget_host: 
         if not os.path.isdir(ts_path):
             continue
 
+        try:
+            ts_children = os.listdir(ts_path)
+            print(f'[find_site_root] {ts_dir}/ children: {ts_children}')
+        except Exception:
+            pass
+
         # wget may store files as:
         #   ts/domain/                     (direct)
         #   ts/http%3A/domain/             (URL-encoded colon)
         #   ts/https%3A/domain/
         #   ts/http%3A/www.domain/
         host_variants = [wget_host, domain_no_www, 'www.' + domain_no_www]
-        scheme_prefixes = ['', 'http%3A', 'https%3A', 'http%3A/', 'https%3A/']
+        # http%3A = Windows wget URL-encoding; http: = Linux wget real colon
+        scheme_prefixes = ['', 'http%3A', 'https%3A', 'http%3A/', 'https%3A/', 'http:', 'https:']
 
         for prefix in scheme_prefixes:
             for host in host_variants:
@@ -353,23 +382,40 @@ def _copy_tree_dedup(src_dir: str, dst_dir: str, seen: set, rel_prefix: str = ''
     return count
 
 
-def extract_site(site_root: str, target_dir: str) -> None:
+def extract_site(site_root: str, target_dir: str, archive_web: str | None = None) -> None:
     """
     Copy all domain files into target_dir from ALL timestamp directories.
     wget follows redirects across timestamps, so assets may land in directories
     with different timestamps than the starting snapshot. We scan every ts-dir
     under web.archive.org/web/ and collect anything belonging to our domain.
     HTML files from the main timestamp take priority over duplicates.
+
+    archive_web: the .../web.archive.org/web/ directory. If not given, computed
+                 from site_root by walking up until a 'web.archive.org' segment is found.
     """
     os.makedirs(target_dir, exist_ok=True)
 
-    # archive_web is the .../web.archive.org/web/ directory
-    archive_web = os.path.dirname(os.path.dirname(os.path.dirname(site_root)))
     domain_basename = os.path.basename(site_root)  # e.g. elizaroseandcompany.com
+
+    if archive_web is None:
+        # Walk up from site_root to find the .../web.archive.org/web/ directory.
+        # site_root may be 2 or 3 levels below archive_web depending on whether
+        # wget created a scheme prefix dir (http: / http%3A) or not.
+        p = site_root
+        while True:
+            parent = os.path.dirname(p)
+            if parent == p:
+                raise FileNotFoundError(f'Could not find web.archive.org/web in: {site_root}')
+            if os.path.basename(parent) == 'web' and os.path.basename(os.path.dirname(parent)) == 'web.archive.org':
+                archive_web = parent
+                break
+            p = parent
 
     # Collect all ts-dirs sorted: main timestamp first (so HTML pages take priority),
     # then all others. This ensures original pages win over redirected duplicates.
-    ts_dir_name = os.path.basename(os.path.dirname(os.path.dirname(site_root)))
+    # Find which ts-dir contains site_root
+    rel = os.path.relpath(site_root, archive_web)  # e.g. TIMESTAMP/http:/domain or TIMESTAMP/domain
+    ts_dir_name = rel.split(os.sep)[0]
     ts_base = re.match(r'(\d+)', ts_dir_name).group(1)
 
     all_entries = sorted(os.listdir(archive_web))
@@ -381,16 +427,26 @@ def extract_site(site_root: str, target_dir: str) -> None:
     seen_files: set[str] = set()  # relative paths already copied (skip duplicates)
     total = 0
 
+    print(f'[extract] archive_web={archive_web}')
+    print(f'[extract] domain_basename={domain_basename}, ts_base={ts_base}')
+    print(f'[extract] ts-dirs to scan ({len(ordered_entries)}): {ordered_entries[:10]}{"..." if len(ordered_entries) > 10 else ""}')
+
     for entry in ordered_entries:
         entry_path = os.path.join(archive_web, entry)
         if not os.path.isdir(entry_path):
             continue
         domain_subdirs = _find_domain_subdirs(entry_path, domain_basename)
+        if not domain_subdirs:
+            # Log what's actually in this timestamp dir (for debugging)
+            try:
+                children = os.listdir(entry_path)[:6]
+                print(f'  [extract] {entry}: no domain dirs found (has: {children})')
+            except Exception:
+                pass
         for domain_subdir in domain_subdirs:
             n = _copy_tree_dedup(domain_subdir, target_dir, seen_files)
-            if n:
-                total += n
-                print(f'  Copied {n} files from ts-dir: {entry} ({os.path.basename(os.path.dirname(domain_subdir))})')
+            print(f'  [extract] {entry}/{os.path.relpath(domain_subdir, entry_path)}: copied {n} files')
+            total += n
 
     print(f'Extracted {total} total files to: {target_dir}')
 
@@ -657,26 +713,34 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
     recovered = 0
     failed: list[str] = []
 
+    # Try both no-www and www variants — archive.org may store assets under either hostname
+    www_domain = f'www.{domain_no_www}' if not domain_no_www.startswith('www.') else domain_no_www
+    domain_variants = [domain_no_www, www_domain] if www_domain != domain_no_www else [domain_no_www]
+
     for abs_path in sorted(missing):
         local_path = os.path.join(site_dir, abs_path.lstrip('/').replace('/', os.sep))
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
         downloaded = False
         for ts in _ts_order(abs_path):
-            url = f'https://web.archive.org/web/{ts}/http://{domain_no_www}{abs_path}'
-            try:
-                req = urllib.request.Request(
-                    url, headers={'User-Agent': 'Mozilla/5.0 (compatible)'}
-                )
-                with urllib.request.urlopen(req, timeout=20) as resp:
-                    data = resp.read()
-                with open(local_path, 'wb') as f:
-                    f.write(data)
-                recovered += 1
-                downloaded = True
+            for host in domain_variants:
+                url = f'https://web.archive.org/web/{ts}/http://{host}{abs_path}'
+                try:
+                    req = urllib.request.Request(
+                        url, headers={'User-Agent': 'Mozilla/5.0 (compatible)'}
+                    )
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        data = resp.read()
+                    with open(local_path, 'wb') as f:
+                        f.write(data)
+                    recovered += 1
+                    downloaded = True
+                    break
+                except Exception as e:
+                    print(f'  [recover] {url}: {e}')
+                    continue
+            if downloaded:
                 break
-            except Exception:
-                continue
 
         if not downloaded:
             failed.append(abs_path)
@@ -735,7 +799,9 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
         raise
 
     # 4. Extract to target
-    extract_site(site_root, target_dir)
+    # Pass archive_web explicitly so extract_site doesn't have to guess depth from site_root
+    archive_web_dir = os.path.join(tmp_dir, 'web.archive.org', 'web')
+    extract_site(site_root, target_dir, archive_web=archive_web_dir)
 
     # 5. Cleanup tmp (only after successful extraction)
     shutil.rmtree(tmp_dir, ignore_errors=True)
