@@ -244,7 +244,9 @@ async def got_archive_url(message: Message, state: FSMContext):
     timestamp = m.group(1)
     domain = re.sub(r'^www\.', '', m.group(2))
 
-    status_msg = await message.answer(f'⏳ Запрашиваю CDX для `{domain}`...', parse_mode='Markdown')
+    status_msg = await message.answer(
+        f'⏳ Оцениваю размер сайта для `{domain}`...', parse_mode='Markdown'
+    )
 
     from pull import _cdx_estimate
     loop = asyncio.get_event_loop()
@@ -252,10 +254,10 @@ async def got_archive_url(message: Message, state: FSMContext):
 
     if total:
         est_min = max(1, round(total * 10 / 60))
-        est_text = f'~{total} уникальных URL → ≈{est_min} мин скачивания'
+        est_text = f'~{total} страниц → ≈{est_min} мин скачивания'
     else:
         est_min = 0
-        est_text = 'CDX недоступен — время скачивания неизвестно'
+        est_text = 'размер сайта не определён — время скачивания неизвестно'
 
     log.info(f'[archive] CDX {domain}: {total} URLs, ~{est_min} min')
 

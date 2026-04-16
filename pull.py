@@ -120,20 +120,21 @@ def _cdx_estimate(domain: str, timestamp: str) -> int:
             f'&collapse=urlkey&matchType=domain'
             f'&filter=statuscode:200&limit=1000{extra}'
         )
-        try:
-            req = urllib.request.Request(cdx_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read())
-            return max(len(data) - 1, 0)
-        except Exception:
-            return 0
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(cdx_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read())
+                return max(len(data) - 1, 0)
+            except Exception:
+                if attempt < 2:
+                    time.sleep(3)
+        return 0
 
     if year:
-        count = _query(f'&from={year}0101&to={year}1231')
-        if count > 0:
-            return count
+        return _query(f'&from={year}0101&to={year}1231')
 
-    return _query()  # fallback: all-time
+    return 0
 
 
 # ---------------------------------------------------------------------------
