@@ -13,7 +13,6 @@ Examples:
 import os
 import re
 import sys
-import json
 import time
 import shutil
 import subprocess
@@ -73,31 +72,32 @@ def _get_wget() -> str:
 # URL parsing
 # ---------------------------------------------------------------------------
 
-def parse_archive_url(archive_url: str) -> tuple[str, str, str]:
+def parse_archive_url(archive_url: str) -> tuple[str, str, str, str]:
     """
     Parse a web.archive.org URL.
-    Returns (timestamp, domain_no_www, original_host_as_wget_sees_it).
+    Returns (timestamp, domain_no_www, original_host_as_wget_sees_it, scheme).
 
     Examples:
       https://web.archive.org/web/20180330095801/http://elizaroseandcompany.com/
-        → ('20180330095801', 'elizaroseandcompany.com', 'elizaroseandcompany.com')
+        → ('20180330095801', 'elizaroseandcompany.com', 'elizaroseandcompany.com', 'http')
       https://web.archive.org/web/20180710220942/http://www.dialacarlondon.com/
-        → ('20180710220942', 'dialacarlondon.com', 'www.dialacarlondon.com')
+        → ('20180710220942', 'dialacarlondon.com', 'www.dialacarlondon.com', 'http')
     """
     m = re.match(
         r'https?://web\.archive\.org/web/(\d+)/'   # timestamp
-        r'https?://(www\.)?([^/]+)',                # optional www + domain
+        r'(https?)://(www\.)?([^/]+)',              # scheme + optional www + domain
         archive_url
     )
     if not m:
         raise ValueError(f'Not a valid web.archive.org URL: {archive_url}')
 
     timestamp      = m.group(1)
-    www_prefix     = m.group(2) or ''
-    domain_no_www  = m.group(3).rstrip('/')
-    wget_host      = www_prefix + domain_no_www   # exactly as in the original URL
+    scheme         = m.group(2)                    # 'http' or 'https'
+    www_prefix     = m.group(3) or ''
+    domain_no_www  = m.group(4).rstrip('/')
+    wget_host      = www_prefix + domain_no_www    # exactly as in the original URL
 
-    return timestamp, domain_no_www, wget_host
+    return timestamp, domain_no_www, wget_host, scheme
 
 
 # ---------------------------------------------------------------------------
@@ -116,16 +116,16 @@ def _cdx_estimate(domain: str, timestamp: str) -> int:
     def _query(extra: str = '') -> int:
         cdx_url = (
             f'https://web.archive.org/cdx/search/cdx'
-            f'?url={domain}/*&output=json&fl=urlkey'
+            f'?url={domain}/*&output=text&fl=urlkey'
             f'&collapse=urlkey&matchType=domain'
-            f'&filter=statuscode:200&limit=1000{extra}'
+            f'&filter=statuscode:200{extra}'
         )
         for attempt in range(3):
             try:
                 req = urllib.request.Request(cdx_url, headers={'User-Agent': 'Mozilla/5.0'})
                 with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read())
-                return max(len(data) - 1, 0)
+                    lines = resp.read().decode('utf-8', errors='replace').strip().splitlines()
+                return len([l for l in lines if l.strip()])
             except Exception:
                 if attempt < 2:
                     time.sleep(3)
@@ -156,6 +156,7 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         '--span-hosts',
         f'--domains={domains}',
         '--timeout=30',
+        '--dns-timeout=5',    # don't hang 30s per dead domain DNS lookup
         '--tries=3',
         '--wait=3',           # 3 sec between requests — avoids archive.org rate limiting on cloud IPs
         '--random-wait',      # randomise 0.5x–1.5x wait (1.5–4.5 sec) so it looks less like a bot
@@ -165,9 +166,9 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         f'--directory-prefix={tmp_dir}',
     ]
 
-    # Asset time limit: estimate * 1.5 + 5 min buffer, min 10 min
+    # Asset time limit: ~5 sec/URL (--wait=3 + page-requisites overhead) + 5 min buffer, min 10 min
     if total_estimated:
-        asset_limit_sec = max(600, int(total_estimated * 2 * 1.5) + 300)
+        asset_limit_sec = max(600, int(total_estimated * 5) + 300)
         print(f'Скачиваем {wget_host} (лимит ресурсов {round(asset_limit_sec/60)} мин)...')
     else:
         asset_limit_sec = 1800  # 30 min default
@@ -648,7 +649,7 @@ def rename_extensionless_html(site_dir: str) -> None:
 # Post-download: recover assets missing from the wget run
 # ---------------------------------------------------------------------------
 
-def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -> None:
+def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str, scheme: str = 'http') -> None:
     """
     Scan all HTML files in site_dir for referenced assets (img/link/script).
     Download any missing files directly from archive.org using appropriate
@@ -713,14 +714,15 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
 
     recovered = 0
     failed: list[str] = []
+    consecutive_failures = 0
 
     # Try both no-www and www variants — archive.org may store assets under either hostname
     www_domain = f'www.{domain_no_www}' if not domain_no_www.startswith('www.') else domain_no_www
     domain_variants = [domain_no_www, www_domain] if www_domain != domain_no_www else [domain_no_www]
 
-    # Brief pause before starting recovery — wget may have triggered rate limiting
-    print('  Пауза 10 сек перед recover (anti-rate-limit)...')
-    time.sleep(10)
+    # Brief pause before starting recovery — wget phase may have exhausted rate limit budget
+    print('  Пауза 60 сек перед recover (anti-rate-limit)...')
+    time.sleep(60)
 
     # Sort by priority: uploads/ and themes/ first (real site content),
     # plugins/ last (third-party assets frequently not archived → waste requests)
@@ -739,8 +741,13 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
 
         downloaded = False
         for ts in _ts_order(abs_path):
-            for host in domain_variants:
-                url = f'https://web.archive.org/web/{ts}/http://{host}{abs_path}'
+            if downloaded:
+                break
+            domain_404 = False  # bare domain returned 404 for this ts → skip www variant
+            for host_idx, host in enumerate(domain_variants):
+                if domain_404 and host_idx > 0:
+                    continue  # www variant won't help if domain already 404'd this ts
+                url = f'https://web.archive.org/web/{ts}/{scheme}://{host}{abs_path}'
                 try:
                     req = urllib.request.Request(
                         url, headers={'User-Agent': 'Mozilla/5.0 (compatible)'}
@@ -750,15 +757,25 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str) -
                     with open(local_path, 'wb') as f:
                         f.write(data)
                     recovered += 1
+                    consecutive_failures = 0
                     downloaded = True
                     time.sleep(4)  # match wget --wait=3 pace to avoid archive.org rate limit
                     break
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        domain_404 = True  # file not archived under this ts — skip www
+                    print(f'  [recover] {url}: HTTP {e.code}')
+                    consecutive_failures += 1
+                    time.sleep(1)  # short sleep for 404 (server responded, just not found)
                 except Exception as e:
                     print(f'  [recover] {url}: {e}')
-                    time.sleep(4)  # same pace on error
-                    continue
-            if downloaded:
-                break
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:
+                        print(f'  [recover] {consecutive_failures} подряд ошибок — пауза 120 сек...')
+                        time.sleep(120)
+                        consecutive_failures = 0
+                    else:
+                        time.sleep(8)
 
         if not downloaded:
             failed.append(abs_path)
@@ -785,7 +802,7 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
     total_estimated: pre-computed CDX count (pass from bot to avoid a second CDX call).
                      If 0, will query CDX here (used when called from CLI).
     """
-    timestamp, domain_no_www, wget_host = parse_archive_url(archive_url)
+    timestamp, domain_no_www, wget_host, scheme = parse_archive_url(archive_url)
     print(f'\n{"="*60}')
     print(f'Archive URL : {archive_url}')
     print(f'Domain      : {domain_no_www}  (wget host: {wget_host})')
@@ -800,7 +817,7 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
         print('Запрашиваем CDX для оценки размера сайта...')
         total_estimated = _cdx_estimate(domain_no_www, timestamp)
     if total_estimated:
-        est_min = max(1, round(total_estimated * 2 / 60))
+        est_min = max(1, round((total_estimated * 5 + 300) / 60))
         print(f'CDX: ~{total_estimated} уникальных URL, ожидаемое время ~{est_min} мин\n')
     else:
         print('CDX недоступен — прогресс без оценки\n')
@@ -860,7 +877,7 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
 
     # 10. Recover any assets still missing after all cleanups
     print('\nChecking for missing assets...')
-    _recover_missing_assets(target_dir, domain_no_www, timestamp)
+    _recover_missing_assets(target_dir, domain_no_www, timestamp, scheme)
 
     print(f'\n✅ Done: {target_dir}')
     return target_dir
@@ -939,6 +956,15 @@ def _fix_absolute_to_relative(site_dir: str, domain: str) -> None:
         re.IGNORECASE
     )
 
+    def _replace_domain(m: re.Match) -> str:
+        # If the character immediately after the domain is '/' (or end of string),
+        # strip the domain and keep the slash. If nothing follows (bare domain URL
+        # like href="https://example.com"), output '/' so links stay valid.
+        rest = m.string[m.end():]
+        if rest.startswith('/'):
+            return ''   # the slash is already there in `rest`
+        return '/'      # bare domain → ensure root-relative link
+
     fixed = 0
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in ['.git']]
@@ -948,7 +974,7 @@ def _fix_absolute_to_relative(site_dir: str, domain: str) -> None:
             fpath = os.path.join(root, fname)
             with open(fpath, encoding='utf-8', errors='ignore') as f:
                 content = f.read()
-            new_content = domain_re.sub('', content)
+            new_content = domain_re.sub(_replace_domain, content)
             if new_content != content:
                 with open(fpath, 'w', encoding='utf-8') as f:
                     f.write(new_content)

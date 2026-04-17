@@ -674,7 +674,7 @@ async def _show_archive_confirm(message_or_callback, state: FSMContext):
 
     if total:
         # Download: show limit (guaranteed max), same formula as wget timeout
-        dl_limit_sec = max(600, int(total * 2 * 1.5) + 300)
+        dl_limit_sec = max(600, int(total * 5) + 300)
         dl_limit_min = round(dl_limit_sec / 60)
         time_parts = [f'📥 Скачивание: не более {dl_limit_min} мин']
 
@@ -1030,7 +1030,7 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
 
     _last_cb  = [0.0]
     _dl_start = [time.time()]
-    dl_limit_min = round(max(600, int(archive_total * 2 * 1.5) + 300) / 60) if archive_total else 30
+    dl_limit_min = round(max(600, int(archive_total * 5) + 300) / 60) if archive_total else 30
 
     def pull_progress_cb(done, total, chat_id=_chat_id, msg_id=_msg_id):
         now = time.time()
