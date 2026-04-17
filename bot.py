@@ -254,16 +254,14 @@ async def got_archive_url(message: Message, state: FSMContext):
     total = await loop.run_in_executor(None, _cdx_estimate, domain, timestamp)
 
     if total:
-        est_min = max(1, round(total * 2 / 60))
-        est_text = f'~{total} страниц → ≈{est_min} мин скачивания'
+        est_text = f'~{total} уникальных страниц'
     else:
-        est_min = 0
-        est_text = 'размер сайта не определён — время скачивания неизвестно'
+        est_text = 'размер сайта не определён'
 
-    log.info(f'[archive] CDX {domain}: {total} URLs, ~{est_min} min')
+    log.info(f'[archive] CDX {domain}: {total} URLs')
 
     await bot.edit_message_text(
-        text=f'✅ Домен: `{domain}`\n📊 {est_text}',
+        text=f'✅ Домен: `{domain}`\n📊 {est_text} — оценка времени на следующем шаге',
         chat_id=message.chat.id, message_id=status_msg.message_id,
         parse_mode='Markdown'
     )
@@ -1022,11 +1020,17 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
 
     # ── Phase 1: download from archive ────────────────────────────────────────
     if archive_total:
-        est_min = max(1, round(archive_total * 2 / 60))
+        dl_limit_sec_est = max(600, int(archive_total * 5) + 300)
+        dl_limit_min_est = round(dl_limit_sec_est / 60)
+        recover_min_est  = max(2, round((60 + archive_total * 0.3 * 15) / 60))
+        seo_min_est      = max(2, round(archive_total * 2 / 60)) if mode != 'translate_only' else 0
+        tr_min_est       = max(1, round(archive_total * len(langs) * 10 / 60)) if mode in ('full', 'translate_only') and langs else 0
+        total_min_est    = dl_limit_min_est + recover_min_est + seo_min_est + tr_min_est
         dl_text = (f'📥 Скачиваю сайт из веб-архива...\n'
                    f'🌐 `{archive_domain}`\n'
-                   f'📊 ~{archive_total} файлов, ≈{est_min} мин')
+                   f'📊 ~{archive_total} страниц, ⏳ итого ~{total_min_est} мин')
     else:
+        dl_limit_min_est = 30
         dl_text = f'📥 Скачиваю сайт из веб-архива...\n🌐 `{archive_domain}`'
 
     status = await message.answer(dl_text, parse_mode='Markdown')
@@ -1045,7 +1049,8 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
             return
         _last_cb[0] = now
         elapsed_min = round((now - _dl_start[0]) / 60, 1)
-        text = f'📥 Скачиваю: {done} файлов... ⏱ {elapsed_min} / {dl_limit_min} мин'
+        total_str = f' / ~{total_min_est} мин общего' if archive_total else ''
+        text = f'📥 Скачиваю: {done} файлов... ⏱ {elapsed_min} мин{total_str}'
         asyncio.run_coroutine_threadsafe(
             bot.edit_message_text(text=text, chat_id=chat_id, message_id=msg_id),
             loop
