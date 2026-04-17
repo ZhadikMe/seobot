@@ -570,6 +570,9 @@ def rename_extensionless_html(site_dir: str) -> None:
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in ['.git']]
         for fname in files:
+            # Skip query-param filenames (should already be stripped, but just in case)
+            if '?' in fname or '@' in fname:
+                continue
             ext = os.path.splitext(fname)[1].lower()
             if ext in SKIP_EXTS:
                 continue
@@ -851,14 +854,16 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
         print(f'\nDetected PHP site ({len(php_files)} .php files) — converting...')
         rename_php_to_html(target_dir)
 
-    # 6. Rename extensionless HTML files (WordPress /events/, /galleries/, etc.)
-    print('\nDetecting extensionless HTML files...')
-    rename_extensionless_html(target_dir)
-
-    # 7. Rename files with wget @param suffix → strip params (e.g. main.css@v=1 → main.css)
-    #    MUST run before fix_archive_scripts so .css files are named correctly when processed
+    # 6. Rename files with wget @param suffix → strip params (e.g. main.css@v=1 → main.css)
+    #    MUST run before rename_extensionless_html: files like index.html?p=123 would otherwise
+    #    get .html appended (because ?p=123 suffix makes them look extensionless), producing
+    #    _qs__p=123.html.html double-extension.
     print('\nFixing wget @param filenames...')
     qs_map = _fix_wget_param_filenames(target_dir, domain_no_www)
+
+    # 7. Rename extensionless HTML files (WordPress /events/, /galleries/, etc.)
+    print('\nDetecting extensionless HTML files...')
+    rename_extensionless_html(target_dir)
 
     # 8. Clean archive.org scripts/toolbar/URLs from HTML/CSS
     print('\nCleaning archive.org artifacts...')
