@@ -678,19 +678,26 @@ async def _show_archive_confirm(message_or_callback, state: FSMContext):
         dl_limit_min = round(dl_limit_sec / 60)
         time_parts = [f'📥 Скачивание: не более {dl_limit_min} мин']
 
-        # SEO fixes: ~2 min regardless of size
-        if mode != 'translate_only':
-            time_parts.append('🔧 SEO-исправления: ~2 мин')
+        # Recover missing assets: 60s pause + ~15s per missing file (~30% of CDX)
+        recover_min = max(2, round((60 + total * 0.3 * 15) / 60))
+        time_parts.append(f'⚙️ Восстановление ассетов: ~{recover_min} мин')
 
-        # Translation: CDX pages × langs × 1 sec per page
+        # SEO fixes: ~2s per page for AI descriptions
+        if mode != 'translate_only':
+            seo_min = max(2, round(total * 2 / 60))
+            time_parts.append(f'🔧 SEO-исправления: ~{seo_min} мин')
+        else:
+            seo_min = 0
+
+        # Translation: ~10s per page per language (measured empirically)
+        tr_min = 0
         if mode in ('full', 'translate_only') and langs:
-            tr_sec = total * len(langs) * 1
-            tr_min = max(1, round(tr_sec / 60))
+            tr_min = max(1, round(total * len(langs) * 10 / 60))
             time_parts.append(f'🌍 Перевод ({len(langs)} яз.): ~{tr_min} мин')
 
         # Total
-        total_min = dl_limit_min + (2 if mode != 'translate_only' else 0) + (tr_min if mode in ('full', 'translate_only') and langs else 0)
-        time_parts.append(f'⏳ Итого: не более ~{total_min} мин')
+        total_min = dl_limit_min + recover_min + seo_min + tr_min
+        time_parts.append(f'⏳ Итого: ~{total_min} мин')
         time_str = '\n'.join(time_parts)
     else:
         time_str = '⏱ Время скачивания неизвестно'
