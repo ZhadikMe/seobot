@@ -762,6 +762,7 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str, s
                         f.write(data)
                     recovered += 1
                     downloaded = True
+                    print(f'  [recover] OK: {abs_path}')
                     time.sleep(4)
                     break
                 except urllib.error.HTTPError as e:
