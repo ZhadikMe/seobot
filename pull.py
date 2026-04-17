@@ -858,7 +858,7 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
     # 7. Rename files with wget @param suffix → strip params (e.g. main.css@v=1 → main.css)
     #    MUST run before fix_archive_scripts so .css files are named correctly when processed
     print('\nFixing wget @param filenames...')
-    _fix_wget_param_filenames(target_dir, domain_no_www)
+    qs_map = _fix_wget_param_filenames(target_dir, domain_no_www)
 
     # 8. Clean archive.org scripts/toolbar/URLs from HTML/CSS
     print('\nCleaning archive.org artifacts...')
@@ -875,6 +875,11 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
     print('Converting absolute URLs to relative...')
     _fix_absolute_to_relative(target_dir, domain_no_www)
 
+    # 9b. Rewrite /?p=123 style links → /_qs__p=123.html
+    if qs_map:
+        print('Rewriting query-string links...')
+        _fix_querystring_links(target_dir, qs_map)
+
     # 10. Recover any assets still missing after all cleanups
     print('\nChecking for missing assets...')
     _recover_missing_assets(target_dir, domain_no_www, timestamp, scheme)
@@ -883,14 +888,19 @@ def pull_snapshot(archive_url: str, target_dir: str, progress_cb=None,
     return target_dir
 
 
-def _fix_wget_param_filenames(site_dir: str, domain: str) -> None:
+def _fix_wget_param_filenames(site_dir: str, domain: str) -> dict[str, str]:
     """
     wget saves query-param filenames differently per OS:
       Windows: 'file.css?v=1' → 'file.css@v=1'  (? replaced with @)
       Linux:   'file.css?v=1' → 'file.css?v=1'  (? kept as-is, valid on Linux fs)
     Rename these files to strip the param suffix, and update references in HTML/CSS.
+
+    For HTML collisions (e.g. index.html already exists when index.html?p=123 arrives),
+    instead of deleting, rename to _qs__p=123.html so the page is preserved.
+    Returns qs_map: {param_str: web_path} for those query-string pages.
     """
-    renames: dict[str, str] = {}  # old_name → new_name (basename only)
+    renames: dict[str, str] = {}   # old_name → new_name (basename only)
+    qs_map: dict[str, str] = {}    # param_str → web path (e.g. 'p=123' → '/_qs__p=123.html')
 
     # Pass 1: find and rename files
     for root, dirs, files in os.walk(site_dir):
@@ -904,22 +914,38 @@ def _fix_wget_param_filenames(site_dir: str, domain: str) -> None:
                 sep = '?'
             if sep is None:
                 continue
-            new_fname = fname.split(sep)[0]  # strip @param or ?param part
-            if not new_fname:
+            sep_idx = fname.index(sep)
+            base = fname[:sep_idx]       # e.g. 'index.html'
+            param_str = fname[sep_idx + 1:]  # e.g. 'p=123'
+            if not base:
                 continue
             src = os.path.join(root, fname)
-            dst = os.path.join(root, new_fname)
+            dst = os.path.join(root, base)
             if not os.path.exists(dst):
                 os.rename(src, dst)
-                renames[fname] = new_fname
+                renames[fname] = base
             else:
-                os.remove(src)  # duplicate, remove param version
+                # Collision — if HTML page, preserve as _qs__{param_str}.html
+                if base.endswith(('.html', '.htm')) or base in ('index.php',):
+                    qs_fname = f'_qs__{param_str}.html'
+                    qs_dst = os.path.join(root, qs_fname)
+                    if not os.path.exists(qs_dst):
+                        os.rename(src, qs_dst)
+                        rel_root = os.path.relpath(root, site_dir).replace('\\', '/')
+                        web_path = f'/{qs_fname}' if rel_root == '.' else f'/{rel_root}/{qs_fname}'
+                        qs_map[param_str] = web_path
+                        renames[fname] = qs_fname
+                    else:
+                        os.remove(src)
+                else:
+                    os.remove(src)  # duplicate non-HTML asset
 
     if renames:
         print(f'  Renamed {len(renames)} files (stripped query-param suffix)')
+    if qs_map:
+        print(f'  Preserved {len(qs_map)} query-string pages as _qs__ files')
 
     # Pass 2: fix references in HTML and CSS files
-    # Build replacement pattern: old filenames (with ? or @ variants) → new name
     fixed = 0
     for root, dirs, files in os.walk(site_dir):
         dirs[:] = [d for d in dirs if d not in ['.git']]
@@ -942,6 +968,48 @@ def _fix_wget_param_filenames(site_dir: str, domain: str) -> None:
                 fixed += 1
     if fixed:
         print(f'  Fixed @param references in {fixed} files')
+
+    return qs_map
+
+
+def _fix_querystring_links(site_dir: str, qs_map: dict[str, str]) -> None:
+    """
+    Rewrite query-string hrefs to point at the _qs__ static pages.
+    e.g. href="/?p=123" → href="/_qs__p=123.html"
+         href="?p=123"  → href="/_qs__p=123.html"
+    """
+    if not qs_map:
+        return
+    fixed = 0
+    for root, dirs, files in os.walk(site_dir):
+        dirs[:] = [d for d in dirs if d not in ['.git']]
+        for fname in files:
+            if not fname.endswith('.html'):
+                continue
+            fpath = os.path.join(root, fname)
+            with open(fpath, encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            new_content = content
+            for param_str, web_path in qs_map.items():
+                escaped = re.escape(param_str)
+                # href="/...?p=123" or href="/?p=123"
+                new_content = re.sub(
+                    r'(href=["\'])[^"\']*\?' + escaped + r'(["\'])',
+                    lambda m, wp=web_path: m.group(1) + wp + m.group(2),
+                    new_content
+                )
+                # href="?p=123" (bare relative)
+                new_content = re.sub(
+                    r'(href=["\'])\?' + escaped + r'(["\'])',
+                    lambda m, wp=web_path: m.group(1) + wp + m.group(2),
+                    new_content
+                )
+            if new_content != content:
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                fixed += 1
+    if fixed:
+        print(f'  Rewrote query-string links in {fixed} files')
 
 
 def _fix_absolute_to_relative(site_dir: str, domain: str) -> None:
