@@ -715,6 +715,7 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str, s
     recovered = 0
     failed: list[str] = []
     consecutive_failures = 0
+    consecutive_all_404 = 0   # files where every ts+host variant returned 404
 
     # Try both no-www and www variants — archive.org may store assets under either hostname
     www_domain = f'www.{domain_no_www}' if not domain_no_www.startswith('www.') else domain_no_www
@@ -736,10 +737,15 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str, s
         return 2
 
     for abs_path in sorted(missing, key=_recover_priority):
+        if consecutive_all_404 >= 10:
+            print(f'  [recover] 10 файлов подряд не найдены в архиве — прекращаем recover.')
+            break
+
         local_path = os.path.join(site_dir, abs_path.lstrip('/').replace('/', os.sep))
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
         downloaded = False
+        all_404 = True  # becomes False if any request returns non-404
         for ts in _ts_order(abs_path):
             if downloaded:
                 break
@@ -764,18 +770,28 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str, s
                 except urllib.error.HTTPError as e:
                     if e.code == 404:
                         domain_404 = True  # file not archived under this ts — skip www
+                    else:
+                        all_404 = False
                     print(f'  [recover] {url}: HTTP {e.code}')
-                    consecutive_failures += 1
-                    time.sleep(1)  # short sleep for 404 (server responded, just not found)
+                    consecutive_failures = 0  # HTTP response = server alive, not rate-limited
+                    time.sleep(3)
                 except Exception as e:
+                    all_404 = False
                     print(f'  [recover] {url}: {e}')
                     consecutive_failures += 1
                     if consecutive_failures >= 3:
-                        print(f'  [recover] {consecutive_failures} подряд ошибок — пауза 120 сек...')
-                        time.sleep(120)
+                        print(f'  [recover] {consecutive_failures} подряд ошибок — пауза 300 сек...')
+                        time.sleep(300)
                         consecutive_failures = 0
                     else:
-                        time.sleep(8)
+                        time.sleep(15)
+
+        if downloaded:
+            consecutive_all_404 = 0
+        elif all_404:
+            consecutive_all_404 += 1
+        else:
+            consecutive_all_404 = 0
 
         if not downloaded:
             failed.append(abs_path)
