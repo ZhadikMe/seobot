@@ -22,6 +22,21 @@ LANG_DIRS = [
     'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
     'el', 'uk', 'ko', 'zh', 'ja', 'sk', 'fi', 'ar', 'hi',
 ]
+
+LANG_LOCALE = {
+    'en': 'en_US', 'ru': 'ru_RU', 'de': 'de_DE', 'fr': 'fr_FR', 'es': 'es_ES',
+    'it': 'it_IT', 'pt': 'pt_PT', 'pl': 'pl_PL', 'nl': 'nl_NL', 'cs': 'cs_CZ',
+    'ro': 'ro_RO', 'sv': 'sv_SE', 'tr': 'tr_TR', 'el': 'el_GR', 'uk': 'uk_UA',
+    'ko': 'ko_KR', 'zh': 'zh_CN', 'ja': 'ja_JP', 'sk': 'sk_SK', 'fi': 'fi_FI',
+    'ar': 'ar_AR', 'hi': 'hi_IN',
+}
+
+
+def _get_og_locale(html: str) -> str | None:
+    lang_m = re.search(r'<html[^>]*\blang=["\']([a-z]{2})', html, re.IGNORECASE)
+    if lang_m:
+        return LANG_LOCALE.get(lang_m.group(1).lower())
+    return None
 ARCHIVE_DIRS = ['web.archive.org', 'web-static.archive.org', 'gmpg.org', '_git_clone']
 
 
@@ -1012,10 +1027,10 @@ def fix_canonical(site_dir: str, site_domain: str = None):
 
 
 def fix_og_image(site_dir: str, site_domain: str = None):
-    """Add og:image to pages missing it, using first <img> found on the page."""
+    """Add/normalize full OG markup on all pages."""
+    from urllib.parse import urlparse
     BASE_URL = _detect_base_url(site_dir, site_domain)
-
-    # Find a fallback image from the whole site
+    site_name = urlparse(BASE_URL).netloc.lstrip('www.') if BASE_URL else None
     fallback_img = _find_fallback_og_image(site_dir, BASE_URL)
 
     for root, dirs, files in os.walk(site_dir):
@@ -1045,49 +1060,54 @@ def fix_og_image(site_dir: str, site_domain: str = None):
                 _make_og_absolute, html, flags=re.IGNORECASE
             )
 
-            if re.search(r'og:image', html):
-                if html != original_html:
-                    with open(fpath, 'w', encoding='utf-8') as f:
-                        f.write(html)
-                continue
+            # Add og:image if missing
+            if not re.search(r'og:image', html):
+                img_url = None
+                for img_m in re.finditer(r'<img[^>]+src=["\']([^"\']+\.(jpg|jpeg|png|webp|gif))["\']', html, re.IGNORECASE):
+                    src = img_m.group(1)
+                    if _is_bad_og_image(src):
+                        continue
+                    if src.startswith('http'):
+                        img_url = src
+                    elif src.startswith('/'):
+                        img_url = BASE_URL.rstrip('/') + src
+                    else:
+                        img_url = BASE_URL.rstrip('/') + '/' + src
+                    break
+                if not img_url and fallback_img:
+                    img_url = fallback_img
+                if img_url:
+                    html = html.replace('</head>', f'<meta property="og:image" content="{img_url}">\n</head>', 1)
 
-            # Try to find a suitable image on this page (skip spacers/icons/gifs)
-            img_url = None
-            for img_m in re.finditer(r'<img[^>]+src=["\']([^"\']+\.(jpg|jpeg|png|webp|gif))["\']', html, re.IGNORECASE):
-                src = img_m.group(1)
-                if _is_bad_og_image(src):
-                    continue
-                if src.startswith('http'):
-                    img_url = src
-                elif src.startswith('/'):
-                    img_url = BASE_URL.rstrip('/') + src
-                else:
-                    img_url = BASE_URL.rstrip('/') + '/' + src
-                break
-
-            if not img_url and fallback_img:
-                img_url = fallback_img
-            if not img_url:
-                continue
-
-            tag = f'<meta property="og:image" content="{img_url}">\n'
-            html = html.replace('</head>', tag + '</head>', 1)
-
-            # Also add og:title and og:url if missing
+            # Add missing og:title
             if not re.search(r'og:title', html):
                 title_m = re.search(r'<title>([^<]+)</title>', html)
                 if title_m:
-                    og_title = f'<meta property="og:title" content="{title_m.group(1).strip()}">\n'
-                    html = html.replace('</head>', og_title + '</head>', 1)
+                    html = html.replace('</head>', f'<meta property="og:title" content="{title_m.group(1).strip()}">\n</head>', 1)
 
+            # Add missing og:url
             if not re.search(r'og:url', html):
                 canon_m = re.search(r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']', html, re.IGNORECASE)
                 if canon_m:
-                    og_url = f'<meta property="og:url" content="{canon_m.group(1)}">\n'
-                    html = html.replace('</head>', og_url + '</head>', 1)
+                    html = html.replace('</head>', f'<meta property="og:url" content="{canon_m.group(1)}">\n</head>', 1)
 
-            with open(fpath, 'w', encoding='utf-8') as f:
-                f.write(html)
+            # Add missing og:type
+            if not re.search(r'og:type', html):
+                html = html.replace('</head>', '<meta property="og:type" content="website">\n</head>', 1)
+
+            # Add missing og:site_name
+            if site_name and not re.search(r'og:site_name', html):
+                html = html.replace('</head>', f'<meta property="og:site_name" content="{site_name}">\n</head>', 1)
+
+            # Add missing og:locale
+            if not re.search(r'og:locale', html):
+                locale = _get_og_locale(html)
+                if locale:
+                    html = html.replace('</head>', f'<meta property="og:locale" content="{locale}">\n</head>', 1)
+
+            if html != original_html:
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    f.write(html)
 
 
 _BAD_OG_IMAGE_RE = re.compile(
@@ -1372,24 +1392,41 @@ def fix_sitemap(site_dir: str, langs: list, site_domain: str = None) -> None:
 
 
 def fix_robots_txt(site_dir: str, site_domain: str = None):
-    """Generate robots.txt if missing. Overwrites if domain was example.com."""
+    """Supplement robots.txt: remove Host directive, ensure correct Sitemap URL."""
     robots_path = os.path.join(site_dir, 'robots.txt')
-    if os.path.exists(robots_path):
-        with open(robots_path, encoding='utf-8', errors='ignore') as f:
-            content = f.read()
-        # Regenerate if it has wrong domain placeholder
-        if 'example.com' not in content and site_domain is None:
-            return
-
     BASE_URL = _detect_base_url(site_dir, site_domain)
     sitemap_url = BASE_URL.rstrip('/') + '/sitemap.xml'
 
-    content = (
+    _FRESH = (
         'User-agent: *\n'
         'Allow: /\n'
         '\n'
         f'Sitemap: {sitemap_url}\n'
     )
+
+    if not os.path.exists(robots_path):
+        with open(robots_path, 'w', encoding='utf-8') as f:
+            f.write(_FRESH)
+        return
+
+    with open(robots_path, encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+
+    # Stale placeholder — regenerate fully
+    if 'example.com' in content:
+        with open(robots_path, 'w', encoding='utf-8') as f:
+            f.write(_FRESH)
+        return
+
+    # Remove Host: directive (Yandex legacy, deprecated)
+    content = re.sub(r'^Host:[^\n]*\n?', '', content, flags=re.MULTILINE | re.IGNORECASE)
+
+    # Update or append Sitemap line
+    sitemap_re = re.compile(r'^Sitemap:.*$', re.MULTILINE | re.IGNORECASE)
+    if sitemap_re.search(content):
+        content = sitemap_re.sub(f'Sitemap: {sitemap_url}', content)
+    else:
+        content = content.rstrip('\n') + f'\n\nSitemap: {sitemap_url}\n'
 
     with open(robots_path, 'w', encoding='utf-8') as f:
         f.write(content)

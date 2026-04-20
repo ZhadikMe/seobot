@@ -139,9 +139,9 @@ run_local.py    — Локальный запуск pipeline без бота и 
 | 4 | `fix_descriptions` | Генерирует уникальный meta description через Groq AI (120–155 символов) |
 | 5 | `fix_h1` | Добавляет H1 на страницы без заголовков (Groq) |
 | 6 | `fix_schema` | Добавляет BreadcrumbList Schema.org |
-| 7 | `fix_og_image` | Добавляет og:image из первого изображения страницы |
+| 7 | `fix_og_image` | Добавляет полную OG-разметку: `og:image` (из первого подходящего изображения), `og:title`, `og:url`, `og:type` (`website`), `og:site_name` (из домена), `og:locale` (из `<html lang="">`). Уже существующие теги не перезаписываются. |
 | 8 | `fix_external_links` | **Удаляет** все внешние `<a href="https://...">` ссылки; текстовые анкоры остаются как текст. Ссылки на собственный домен, mailto:, tel: не трогаются |
-| 9 | `fix_robots_txt` | Создаёт/обновляет robots.txt со ссылкой на sitemap |
+| 9 | `fix_robots_txt` | Дополняет robots.txt: удаляет устаревшую директиву `Host:`, добавляет или обновляет строку `Sitemap:` на актуальный URL. Полная перезапись только если файла нет или он содержит `example.com`-заглушку. |
 | 10 | `fix_sitemap` | Генерирует sitemap.xml со всеми страницами и hreflang |
 
 ### Сценарий Б (GitHub) — SEO-шаги
