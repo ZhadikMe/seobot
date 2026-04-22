@@ -1048,7 +1048,18 @@ def index():
 def start():
     source_type = request.form.get('source_type', 'zip')
     domain = request.form.get('domain', '').strip()
-    repo   = request.form.get('repo', '').strip()
+    # Strip scheme and www so user can paste full URL without breaking canonical/sitemap
+    for _pfx in ('https://www.', 'http://www.', 'https://', 'http://'):
+        if domain.startswith(_pfx):
+            domain = domain[len(_pfx):]
+            break
+    domain = domain.rstrip('/')
+    repo   = request.form.get('repo', '').strip().rstrip('/')
+    # Allow pasting full GitHub URL
+    if repo.startswith('https://github.com/'):
+        repo = repo[len('https://github.com/'):]
+    elif repo.startswith('github.com/'):
+        repo = repo[len('github.com/'):]
     token  = request.form.get('token', '').strip() or GITHUB_TOKEN
     mode   = request.form.get('mode', 'full')
     langs  = request.form.get('langs', 'all')
