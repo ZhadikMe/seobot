@@ -764,7 +764,7 @@ class _QueueHandler(logging.Handler):
     def __init__(self, q):
         super().__init__()
         self.q = q
-        self.setFormatter(logging.Formatter('%(asctime)s  %(message)s', '%H:%M:%S'))
+        self.setFormatter(logging.Formatter('%(message)s'))
     def emit(self, record):
         self.q.put(self.format(record))
 

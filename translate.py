@@ -153,8 +153,8 @@ def translate_batch(api_key: str, segments: list[str], target_lang: str, retries
     lang_code = SUPPORTED_LANGS.get(target_lang, target_lang.upper())
     result = {}
 
-    # Chunk into batches of 50 segments to avoid API payload limits
-    chunk_size = 50
+    # Chunk into batches of 20 segments (smaller = fewer silent API failures)
+    chunk_size = 20
     chunks = [segments[i:i+chunk_size] for i in range(0, len(segments), chunk_size)]
 
     for chunk in chunks:
@@ -167,7 +167,7 @@ def translate_batch(api_key: str, segments: list[str], target_lang: str, retries
                         'Content-Type': 'application/json',
                     },
                     json={'text': chunk, 'target_lang': lang_code},
-                    timeout=60,
+                    timeout=120,
                 )
                 resp.raise_for_status()
                 translations = resp.json().get('translations', [])
@@ -179,6 +179,29 @@ def translate_batch(api_key: str, segments: list[str], target_lang: str, retries
                     print(f'    translate error after {retries} attempts: {e}')
                 else:
                     time.sleep(2 ** attempt)
+
+    # Retry segments where API silently returned the original (fake translation)
+    fakes = [s for s in segments if result.get(s, s) == s and s in result]
+    if fakes:
+        for seg in fakes:
+            for attempt in range(2):
+                try:
+                    resp = requests.post(
+                        WOWAI_API_URL,
+                        headers={
+                            'Authorization': f'DeepL-Auth-Key {api_key}',
+                            'Content-Type': 'application/json',
+                        },
+                        json={'text': [seg], 'target_lang': lang_code},
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    translations = resp.json().get('translations', [])
+                    if translations and translations[0]['text'] != seg:
+                        result[seg] = translations[0]['text']
+                        break
+                except Exception:
+                    time.sleep(2)
 
     return result
 
