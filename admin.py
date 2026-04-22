@@ -15,7 +15,7 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB
 
 GROQ_KEY     = os.environ.get('GROQ_API_KEY', '')
-WOWAI_KEY    = os.environ.get('WOWAI_API_KEY', '')
+WOWAI_KEY    = os.environ.get('WOWAI_API_KEY', 'sk_trans_o5Un1stZ7eEG5uXovdDK_XlwzGHnqHd5lPJl9RxmA5U')
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
 
 ALL_LANGS = ['ru','de','fr','es','it','pt','pl','nl','cs','ro','sv','tr','el','uk','ko','zh','ja','sk','fi','ar','hi']

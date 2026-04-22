@@ -27,8 +27,8 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-WOWAI_KEY   = os.environ.get('WOWAI_KEY', '')
-GROQ_KEY    = os.environ.get('GROQ_KEY', '')
+WOWAI_KEY   = os.environ.get('WOWAI_API_KEY') or os.environ.get('WOWAI_KEY') or 'sk_trans_o5Un1stZ7eEG5uXovdDK_XlwzGHnqHd5lPJl9RxmA5U'
+GROQ_KEY    = os.environ.get('GROQ_API_KEY') or os.environ.get('GROQ_KEY', '')
 
 ALL_LANGS = [
     'ru', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'nl', 'cs', 'ro', 'sv', 'tr',
