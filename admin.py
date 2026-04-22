@@ -1044,6 +1044,6 @@ def stream(job_id):
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get('ADMIN_PORT', 8080))
+    port = int(os.environ.get('PORT') or os.environ.get('ADMIN_PORT', 8080))
     print(f'\n  SEO Admin Panel → http://localhost:{port}\n')
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
