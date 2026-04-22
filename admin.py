@@ -798,6 +798,20 @@ class _StdoutToQueue:
     def fileno(self):
         return self.original.fileno() if self.original else 1
 
+    def reconfigure(self, **kwargs):
+        pass  # called by run_local.py / translate.py at import time
+
+    def isatty(self):
+        return False
+
+    @property
+    def encoding(self):
+        return getattr(self.original, 'encoding', 'utf-8')
+
+    @property
+    def errors(self):
+        return getattr(self.original, 'errors', 'replace')
+
 
 # ── Sync PR creation ──────────────────────────────────────────────────────────
 
