@@ -720,9 +720,17 @@ function listenLogs(jobId, btn, btnText, domain) {
     else if (/^\s{4,}|File "|^\d{2}:\d{2}/.test(line)) cls = 'dim';
     addLine(line, cls);
   };
+  let _errTimer = null;
   es.onerror = () => {
-    es.close(); addLine('⚠ Соединение прервано', 'warn');
-    btn.disabled = false; btn.classList.remove('loading'); btnText.textContent = 'Попробовать снова';
+    // SSE reconnects automatically — wait 8s before declaring failure
+    if (_errTimer) return;
+    _errTimer = setTimeout(() => {
+      if (es.readyState === EventSource.CLOSED) {
+        addLine('⚠ Соединение прервано', 'warn');
+        btn.disabled = false; btn.classList.remove('loading'); btnText.textContent = 'Попробовать снова';
+      }
+      _errTimer = null;
+    }, 8000);
   };
 }
 
@@ -759,6 +767,36 @@ class _QueueHandler(logging.Handler):
         self.setFormatter(logging.Formatter('%(asctime)s  %(message)s', '%H:%M:%S'))
     def emit(self, record):
         self.q.put(self.format(record))
+
+
+# ── Stdout redirector (captures print() from pull.py etc.) ───────────────────
+
+class _StdoutToQueue:
+    """Write sys.stdout to the SSE queue AND the original stdout (Railway logs)."""
+    def __init__(self, q, original):
+        self.q = q
+        self.original = original
+        self._buf = ''
+
+    def write(self, s):
+        if self.original:
+            self.original.write(s)
+        self._buf += s
+        while '\n' in self._buf:
+            line, self._buf = self._buf.split('\n', 1)
+            line = line.strip('\r')
+            if line:
+                self.q.put(line)
+
+    def flush(self):
+        if self.original:
+            self.original.flush()
+        if self._buf.strip():
+            self.q.put(self._buf.strip())
+            self._buf = ''
+
+    def fileno(self):
+        return self.original.fileno() if self.original else 1
 
 
 # ── Sync PR creation ──────────────────────────────────────────────────────────
@@ -905,24 +943,40 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
 
     def log_fn(msg): q.put(msg)
 
+    # Attach handlers to ROOT logger explicitly — logging.basicConfig() in
+    # run_local.py is a no-op when Flask pre-initializes root handlers,
+    # so without this, translation/SEO logging goes nowhere.
+    root_log = logging.getLogger()
+    root_log.setLevel(logging.INFO)
     handler = _QueueHandler(q)
-    logging.getLogger().addHandler(handler)
+    handler.setLevel(logging.DEBUG)
+    root_log.addHandler(handler)
+    # Also ensure Railway stdout gets the logs (not just the SSE queue).
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(logging.INFO)
+    stdout_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s', '%H:%M:%S'))
+    root_log.addHandler(stdout_handler)
+
+    # Redirect sys.stdout so that pull.py's print() calls also appear in SSE.
+    old_stdout = sys.stdout
+    sys.stdout = _StdoutToQueue(q, old_stdout)
 
     try:
         from run_local import run_pipeline, ALL_LANGS
         langs = ALL_LANGS if langs_str in ('all', '') else [l.strip() for l in langs_str.split(',')]
 
         # ── Phase 1: obtain site_dir ──────────────────────────────────────────
+        log_fn(f'{"="*54}')
         if source_type == 'zip':
             site_dir = _find_site_root(tmp_dir)
             log_fn(f'📁 Архив распакован: {site_dir}')
 
         elif source_type == 'archive':
             log_fn(f'📥 Скачиваю снапшот из Wayback Machine...')
-            log_fn(f'🌐 URL: {source_value}')
+            log_fn(f'🌐 {source_value}')
             from pull import pull_snapshot
             site_dir = pull_snapshot(source_value, tmp_dir)
-            log_fn(f'✅ Снапшот скачан в: {site_dir}')
+            log_fn(f'✅ Снапшот скачан: {site_dir}')
 
         elif source_type == 'github':
             site_dir = _download_github_sync(source_value, tmp_dir, token, log_fn)
@@ -931,14 +985,14 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
         else:
             raise ValueError(f'Unknown source_type: {source_type}')
 
-        log_fn('')
+        log_fn(f'{"="*54}')
         log_fn(f'▶ Домен: {domain}  |  Режим: {mode}  |  Языков: {len(langs)}')
-        log_fn('')
+        log_fn(f'{"="*54}')
 
         # ── Phase 2: SEO pipeline ─────────────────────────────────────────────
         result = run_pipeline(site_dir, domain, mode, langs)
 
-        log_fn('')
+        log_fn(f'{"="*54}')
         if result:
             log_fn(f'✅ Pipeline завершён. Проблем: {result["before"]} → {result["after"]}')
         else:
@@ -963,7 +1017,9 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
         q.put('ERROR:')
         job['status'] = 'error'
     finally:
-        logging.getLogger().removeHandler(handler)
+        sys.stdout = old_stdout
+        root_log.removeHandler(handler)
+        root_log.removeHandler(stdout_handler)
         q.put(None)
 
 
@@ -1035,7 +1091,11 @@ def stream(job_id):
     def generate():
         q = _jobs[job_id]['log_queue']
         while True:
-            line = q.get()
+            try:
+                line = q.get(timeout=25)
+            except queue.Empty:
+                yield ': keepalive\n\n'  # SSE comment — proxy stays alive, browser ignores
+                continue
             if line is None: return
             yield f'data: {line}\n\n'
 
