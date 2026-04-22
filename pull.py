@@ -308,13 +308,50 @@ def find_site_root(tmp_dir: str, timestamp: str, domain_no_www: str, wget_host: 
             if domain_no_www in sub:
                 print(f'Found site root (fuzzy L1): {sub_path}')
                 return sub_path
-            # One level deeper (e.g. ts/http%3A/domain)
-            for sub2 in os.listdir(sub_path):
+            # One level deeper (e.g. ts/http:/domain or ts/https:/domain)
+            try:
+                sub_children = os.listdir(sub_path)
+                print(f'[find_site_root]   {sub}/ children: {sub_children}')
+            except Exception as e:
+                print(f'[find_site_root]   cannot list {sub}: {e}')
+                continue
+            for sub2 in sub_children:
                 if domain_no_www in sub2:
                     p = os.path.join(sub_path, sub2)
                     if os.path.isdir(p):
                         print(f'Found site root (fuzzy L2): {p}')
                         return p
+            # Two levels deeper (e.g. ts/https:/domain:443/ or ts/https:/www.domain/)
+            for sub2 in sub_children:
+                sub2_path = os.path.join(sub_path, sub2)
+                if not os.path.isdir(sub2_path):
+                    continue
+                try:
+                    sub2_children = os.listdir(sub2_path)
+                except Exception:
+                    continue
+                for sub3 in sub2_children:
+                    if domain_no_www in sub3:
+                        p = os.path.join(sub2_path, sub3)
+                        if os.path.isdir(p):
+                            print(f'Found site root (fuzzy L3): {p}')
+                            return p
+
+    # Last resort: os.walk — collect all directories whose name contains domain_no_www,
+    # then return the shallowest one (fewest path components = closest to root)
+    print(f'[find_site_root] Last resort: walking {archive_base} for "{domain_no_www}"...')
+    candidates = []
+    for root, dirs, files in os.walk(archive_base):
+        for d in dirs:
+            if domain_no_www in d:
+                candidate = os.path.join(root, d)
+                print(f'[find_site_root] walk candidate: {candidate}')
+                candidates.append(candidate)
+    if candidates:
+        # Prefer shallowest path (smallest depth = most likely the site root)
+        best_match = min(candidates, key=lambda p: p.count(os.sep))
+        print(f'Found site root (walk): {best_match}')
+        return best_match
 
     raise FileNotFoundError(
         f'Could not locate site directory for "{domain_no_www}" '
