@@ -3,7 +3,7 @@
 admin.py — Web admin panel for SEO pipeline.
 Run: python admin.py  →  http://localhost:8080
 """
-import os, sys, uuid, queue, threading, tempfile, zipfile, io, shutil, logging, subprocess
+import os, sys, uuid, threading, time, tempfile, zipfile, io, shutil, logging, subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from flask import Flask, render_template_string, request, Response, jsonify
@@ -776,6 +776,41 @@ function shake(id) {
   el.style.animation = 'shake .35s ease';
   el.addEventListener('animationend', () => el.style.animation = '', { once:true });
 }
+
+/* ── Auto-reconnect on page load ── */
+async function checkActiveJob() {
+  try {
+    const resp = await fetch('/jobs/active');
+    const jobs = await resp.json();
+    if (!jobs.length) return;
+    const job = jobs[0];
+
+    const btn     = document.getElementById('start-btn');
+    const btnText = document.getElementById('btn-text');
+    const logCard = document.getElementById('log-card');
+
+    logCard.classList.remove('hidden');
+    document.getElementById('log').innerHTML = '';
+    document.getElementById('log-dom').textContent = job.domain;
+    document.getElementById('log-dot').className = 'log-dot running';
+    document.getElementById('log-titl').textContent = 'Выполняется...';
+    setProg(10);
+    logCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    btn.disabled = true; btn.classList.add('loading');
+    btnText.textContent = 'Выполняется...';
+
+    _currentJobId = job.job_id;
+    const stopBtn = document.getElementById('stop-btn');
+    stopBtn.classList.remove('hidden');
+    stopBtn.disabled = false;
+    stopBtn.textContent = '⏹ Stop & Push PR';
+
+    listenLogs(job.job_id, btn, btnText, job.domain);
+  } catch(e) { /* no active jobs or server unavailable */ }
+}
+
+document.addEventListener('DOMContentLoaded', checkActiveJob);
 </script>
 <style>
 @keyframes shake {
@@ -789,21 +824,21 @@ function shake(id) {
 
 # ── Logging handler ───────────────────────────────────────────────────────────
 
-class _QueueHandler(logging.Handler):
-    def __init__(self, q):
+class _LogHandler(logging.Handler):
+    def __init__(self, push_fn):
         super().__init__()
-        self.q = q
+        self.push_fn = push_fn
         self.setFormatter(logging.Formatter('%(message)s'))
     def emit(self, record):
-        self.q.put(self.format(record))
+        self.push_fn(self.format(record))
 
 
 # ── Stdout redirector (captures print() from pull.py etc.) ───────────────────
 
 class _StdoutToQueue:
-    """Write sys.stdout to the SSE queue AND the original stdout (Railway logs)."""
-    def __init__(self, q, original):
-        self.q = q
+    """Write sys.stdout to the log history AND the original stdout (Railway logs)."""
+    def __init__(self, push_fn, original):
+        self.push_fn = push_fn
         self.original = original
         self._buf = ''
 
@@ -815,13 +850,13 @@ class _StdoutToQueue:
             line, self._buf = self._buf.split('\n', 1)
             line = line.strip('\r')
             if line:
-                self.q.put(line)
+                self.push_fn(line)
 
     def flush(self):
         if self.original:
             self.original.flush()
         if self._buf.strip():
-            self.q.put(self._buf.strip())
+            self.push_fn(self._buf.strip())
             self._buf = ''
 
     def fileno(self):
@@ -982,16 +1017,16 @@ def _find_site_root(tmp_dir):
 def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
                      domain, repo, token, mode, langs_str, stop_event=None):
     job = _jobs[job_id]
-    q   = job['log_queue']
 
-    def log_fn(msg): q.put(msg)
+    def log_fn(msg):
+        job['log_history'].append(msg)
 
     # Attach handlers to ROOT logger explicitly — logging.basicConfig() in
     # run_local.py is a no-op when Flask pre-initializes root handlers,
     # so without this, translation/SEO logging goes nowhere.
     root_log = logging.getLogger()
     root_log.setLevel(logging.INFO)
-    handler = _QueueHandler(q)
+    handler = _LogHandler(log_fn)
     handler.setLevel(logging.DEBUG)
     root_log.addHandler(handler)
     # Also ensure Railway stdout gets the logs (not just the SSE queue).
@@ -1002,7 +1037,7 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
 
     # Redirect sys.stdout so that pull.py's print() calls also appear in SSE.
     old_stdout = sys.stdout
-    sys.stdout = _StdoutToQueue(q, old_stdout)
+    sys.stdout = _StdoutToQueue(log_fn, old_stdout)
 
     try:
         from run_local import run_pipeline, ALL_LANGS
@@ -1054,19 +1089,19 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
 
         job['status'] = 'done'
         job['result'] = pr_url
-        q.put(f'DONE:{pr_url or ""}')
+        log_fn(f'DONE:{pr_url or ""}')
 
     except Exception as e:
         import traceback
         log_fn(f'❌ Критическая ошибка: {e}')
         log_fn(traceback.format_exc())
-        q.put('ERROR:')
+        log_fn('ERROR:')
         job['status'] = 'error'
     finally:
         sys.stdout = old_stdout
         root_log.removeHandler(handler)
         root_log.removeHandler(stdout_handler)
-        q.put(None)
+        log_fn(None)  # sentinel: end of stream
 
 
 # ── Flask routes ──────────────────────────────────────────────────────────────
@@ -1130,8 +1165,10 @@ def start():
 
     job_id = str(uuid.uuid4())[:8]
     stop_event = threading.Event()
-    _jobs[job_id] = {'status': 'running', 'log_queue': queue.Queue(), 'result': None,
-                     'stop_event': stop_event}
+    _jobs[job_id] = {
+        'status': 'running', 'log_history': [], 'result': None,
+        'stop_event': stop_event, 'domain': domain,
+    }
 
     threading.Thread(
         target=_pipeline_thread,
@@ -1160,18 +1197,38 @@ def stream(job_id):
         return 'Not found', 404
 
     def generate():
-        q = _jobs[job_id]['log_queue']
+        job = _jobs[job_id]
+        offset = 0
+        last_ka = time.time()
+
         while True:
-            try:
-                line = q.get(timeout=25)
-            except queue.Empty:
-                yield ': keepalive\n\n'  # SSE comment — proxy stays alive, browser ignores
-                continue
-            if line is None: return
-            yield f'data: {line}\n\n'
+            hist = job['log_history']
+            if offset < len(hist):
+                line = hist[offset]
+                offset += 1
+                if line is None:
+                    return
+                yield f'data: {line}\n\n'
+            else:
+                if job['status'] != 'running':
+                    return
+                if time.time() - last_ka > 20:
+                    yield ': keepalive\n\n'
+                    last_ka = time.time()
+                time.sleep(0.2)
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/jobs/active')
+def active_jobs():
+    running = [
+        {'job_id': jid, 'domain': job.get('domain', ''), 'status': job['status']}
+        for jid, job in _jobs.items()
+        if job['status'] == 'running'
+    ]
+    return jsonify(running)
 
 
 if __name__ == '__main__':
