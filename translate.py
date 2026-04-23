@@ -153,8 +153,8 @@ def translate_batch(api_key: str, segments: list[str], target_lang: str, retries
     lang_code = SUPPORTED_LANGS.get(target_lang, target_lang.upper())
     result = {}
 
-    # Chunk into batches of 20 segments (smaller = fewer silent API failures)
-    chunk_size = 20
+    # Chunk into batches of 3 segments (WowAI times out on larger batches)
+    chunk_size = 3
     chunks = [segments[i:i+chunk_size] for i in range(0, len(segments), chunk_size)]
 
     for chunk in chunks:
