@@ -43,7 +43,7 @@ ARCHIVE_DIRS = ['web.archive.org', 'web-static.archive.org', 'gmpg.org', '_git_c
 def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
                   site_domain: str = None, wowai_key: str = None,
                   progress_callback=None, source_lang: str = 'en',
-                  translate_only: bool = False) -> dict:
+                  translate_only: bool = False, stop_event=None) -> dict:
     """Dispatcher — runs a specific fix step."""
     try:
         if step_key == 'fix_archive_scripts':
@@ -76,7 +76,8 @@ def run_all_fixes(site_dir: str, step_key: str, langs: list, groq_api_key: str,
             fix_hreflang_translated(site_dir, langs, site_domain, source_lang=source_lang)
         elif step_key == 'fix_translations':
             fix_translations(site_dir, langs, wowai_key or groq_api_key, site_domain,
-                             progress_callback, translate_only=translate_only)
+                             progress_callback, translate_only=translate_only,
+                             stop_event=stop_event)
         elif step_key == 'fix_internal_links':
             fix_internal_links(site_dir)
         elif step_key == 'fix_title_refresh':
@@ -1504,7 +1505,8 @@ def _count_translatable_pages(site_dir: str) -> int:
 
 
 def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str = None,
-                     progress_callback=None, translate_only: bool = False):
+                     progress_callback=None, translate_only: bool = False,
+                     stop_event=None):
     """Run translation script on the site directory."""
     translate_script = os.path.join(site_dir, 'scripts', 'translate.py')
     our_script = os.path.join(os.path.dirname(__file__), 'translate.py')
@@ -1544,6 +1546,10 @@ def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str 
     stderr_tail = []
     try:
         for line in proc.stdout:
+            if stop_event and stop_event.is_set():
+                proc.terminate()
+                _log.info('[translate] ⏹ Cancellation requested — translation stopped')
+                return
             line = line.rstrip()
             if line:
                 _log.info('[translate] %s', line)
@@ -1560,7 +1566,7 @@ def fix_translations(site_dir: str, langs: list, api_key: str, site_domain: str 
     except subprocess.TimeoutExpired:
         proc.kill()
         raise RuntimeError('Translation timed out after 30 minutes')
-    if proc.returncode != 0:
+    if proc.returncode not in (0, -15):  # -15 = SIGTERM (cancelled)
         tail = '\n'.join(stderr_tail[-20:])
         raise RuntimeError(f'Translation failed (exit {proc.returncode}):\n{tail}')
 

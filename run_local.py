@@ -60,7 +60,8 @@ TRANSLATE_STEPS = [
 ]
 
 
-def run_pipeline(site_dir: str, domain: str, mode: str = 'full', langs: list = None):
+def run_pipeline(site_dir: str, domain: str, mode: str = 'full', langs: list = None,
+                 stop_event=None):
     from fixes import run_all_fixes
     from translate import detect_source_lang
     from audit import run_audit_on_dir
@@ -95,6 +96,10 @@ def run_pipeline(site_dir: str, domain: str, mode: str = 'full', langs: list = N
         steps = SEO_STEPS + TRANSLATE_STEPS
 
     for label, step_key in steps:
+        if stop_event and stop_event.is_set():
+            log.info('⏹ Отменено пользователем — выхожу из pipeline')
+            break
+
         log.info(f'  [{step_key}] {label}')
         t0 = time.time()
 
@@ -106,6 +111,7 @@ def run_pipeline(site_dir: str, domain: str, mode: str = 'full', langs: list = N
             domain, WOWAI_KEY,
             progress_cb if step_key == 'fix_translations' else None,
             source_lang, translate_only,
+            stop_event,
         )
         elapsed = time.time() - t0
 
@@ -113,6 +119,10 @@ def run_pipeline(site_dir: str, domain: str, mode: str = 'full', langs: list = N
             log.warning(f'    ОШИБКА: {result["error"]}')
         else:
             log.info(f'    Готово за {elapsed:.1f}s')
+
+        if stop_event and stop_event.is_set():
+            log.info('⏹ Перевод прерван — переходим к PR')
+            break
 
     audit_after = run_audit_on_dir(site_dir)
     log.info(f'Проблем после исправлений: {audit_after["failed"]} / {audit_after["total"]} страниц')

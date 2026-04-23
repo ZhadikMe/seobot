@@ -298,6 +298,15 @@ input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(99,102,241,.
 .res-btn:hover { background:rgba(99,102,241,.28); }
 
 .hidden { display:none; }
+
+/* ── Stop button ── */
+.btn-stop {
+  padding:6px 14px; border-radius:8px; font-size:12px; font-weight:600;
+  background:rgba(239,68,68,.14); border:1px solid rgba(239,68,68,.3);
+  color:var(--red); cursor:pointer; transition:all .15s; white-space:nowrap;
+}
+.btn-stop:hover:not(:disabled) { background:rgba(239,68,68,.25); border-color:rgba(239,68,68,.5); }
+.btn-stop:disabled { opacity:.45; cursor:not-allowed; }
 </style>
 </head>
 <body>
@@ -510,6 +519,7 @@ input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(99,102,241,.
     <div class="log-dot running" id="log-dot"></div>
     <span class="log-titl" id="log-titl">Выполняется...</span>
     <span class="log-dom" id="log-dom"></span>
+    <button class="btn-stop hidden" id="stop-btn" onclick="stopJob()">⏹ Stop &amp; Push PR</button>
   </div>
   <div class="prog-wrap on" id="prog-wrap"><div class="prog-bar" id="prog-bar"></div></div>
   <div class="log-area" id="log"></div>
@@ -606,6 +616,17 @@ function setProg(v) {
   document.getElementById('prog-wrap').classList.toggle('on', v > 0 && v < 100);
 }
 
+/* ── Stop ── */
+let _currentJobId = null;
+
+function stopJob() {
+  if (!_currentJobId) return;
+  const btn = document.getElementById('stop-btn');
+  btn.disabled = true;
+  btn.textContent = 'Stopping...';
+  fetch('/stop/' + _currentJobId, { method: 'POST' });
+}
+
 /* ── Start ── */
 async function startJob() {
   const repo   = document.getElementById('repo').value.trim();
@@ -661,6 +682,10 @@ async function startJob() {
 
   btnText.textContent = 'Выполняется...';
   setProg(10);
+  _currentJobId = data.job_id;
+  document.getElementById('stop-btn').classList.remove('hidden');
+  document.getElementById('stop-btn').disabled = false;
+  document.getElementById('stop-btn').textContent = '⏹ Stop & Push PR';
   listenLogs(data.job_id, btn, btnText, domain);
 }
 
@@ -692,6 +717,8 @@ function listenLogs(jobId, btn, btnText, domain) {
 
     if (line.startsWith('DONE:')) {
       es.close(); setProg(100); setTimeout(() => setProg(0), 900);
+      document.getElementById('stop-btn').classList.add('hidden');
+      _currentJobId = null;
       const pr = line.slice(5).trim();
       const res = document.getElementById('result');
       res.classList.remove('hidden');
@@ -706,6 +733,8 @@ function listenLogs(jobId, btn, btnText, domain) {
     }
     if (line.startsWith('ERROR:')) {
       es.close(); setProg(0);
+      document.getElementById('stop-btn').classList.add('hidden');
+      _currentJobId = null;
       showErr('Pipeline завершился с ошибкой — проверь лог выше');
       document.getElementById('log-dot').className = 'log-dot err';
       document.getElementById('log-titl').textContent = 'Ошибка';
@@ -951,7 +980,7 @@ def _find_site_root(tmp_dir):
 # ── Pipeline thread ───────────────────────────────────────────────────────────
 
 def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
-                     domain, repo, token, mode, langs_str):
+                     domain, repo, token, mode, langs_str, stop_event=None):
     job = _jobs[job_id]
     q   = job['log_queue']
 
@@ -1004,10 +1033,13 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
         log_fn(f'{"="*54}')
 
         # ── Phase 2: SEO pipeline ─────────────────────────────────────────────
-        result = run_pipeline(site_dir, domain, mode, langs)
+        result = run_pipeline(site_dir, domain, mode, langs, stop_event=stop_event)
 
+        cancelled = stop_event and stop_event.is_set()
         log_fn(f'{"="*54}')
-        if result:
+        if cancelled:
+            log_fn('⏹ Pipeline прерван по запросу — создаю PR с текущим прогрессом...')
+        elif result:
             log_fn(f'✅ Pipeline завершён. Проблем: {result["before"]} → {result["after"]}')
         else:
             log_fn('✅ Pipeline завершён')
@@ -1097,15 +1129,29 @@ def start():
         return jsonify({'error': str(e)}), 400
 
     job_id = str(uuid.uuid4())[:8]
-    _jobs[job_id] = {'status': 'running', 'log_queue': queue.Queue(), 'result': None}
+    stop_event = threading.Event()
+    _jobs[job_id] = {'status': 'running', 'log_queue': queue.Queue(), 'result': None,
+                     'stop_event': stop_event}
 
     threading.Thread(
         target=_pipeline_thread,
-        args=(job_id, source_type, source_value, tmp_dir, domain, repo, token, mode, langs),
+        args=(job_id, source_type, source_value, tmp_dir, domain, repo, token, mode, langs,
+              stop_event),
         daemon=True,
     ).start()
 
     return jsonify({'job_id': job_id})
+
+
+@app.route('/stop/<job_id>', methods=['POST'])
+def stop_job(job_id):
+    job = _jobs.get(job_id)
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    ev = job.get('stop_event')
+    if ev:
+        ev.set()
+    return jsonify({'ok': True})
 
 
 @app.route('/stream/<job_id>')
