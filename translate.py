@@ -154,7 +154,7 @@ def translate_batch(api_key: str, segments: list[str], target_lang: str, retries
     result = {}
 
     # Chunk into batches of 3 segments (WowAI times out on larger batches)
-    chunk_size = 3
+    chunk_size = 40
     chunks = [segments[i:i+chunk_size] for i in range(0, len(segments), chunk_size)]
 
     for chunk in chunks:
@@ -616,9 +616,9 @@ def _extract_nav_segments(html: str) -> list[str]:
             if 2 <= len(text) <= 60 and not text.startswith('http') and not _should_skip_segment(text):
                 segments.append(text)
         for tag in ('button', 'span', 'li'):
-            for m in re.finditer(rf'<{tag}[^>]*>([^<]{{2,80}})</{tag}>', section_html, re.IGNORECASE):
+            for m in re.finditer(rf'<{tag}[^>]*>([^<]{{2,40}})</{tag}>', section_html, re.IGNORECASE):
                 text = m.group(1).strip()
-                if 2 <= len(text) <= 80 and not _should_skip_segment(text):
+                if 2 <= len(text) <= 40 and not _should_skip_segment(text):
                     segments.append(text)
 
     seen = set()
@@ -656,6 +656,9 @@ def build_nav_cache(api_key: str, site_dir: str, target_langs: list,
         return {}
 
     nav_list = sorted(all_nav_segs)
+    if len(nav_list) > 50:
+        print(f'  [nav-cache] {len(nav_list)} strings — too many for caching, skipping (per-page translation)')
+        return {}
     print(f'  [nav-cache] {len(nav_list)} unique nav/footer strings → pre-translating...')
 
     cache: dict[str, dict[str, str]] = {}

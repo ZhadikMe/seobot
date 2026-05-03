@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 bot.log
+.claude/
+settings.local.json
