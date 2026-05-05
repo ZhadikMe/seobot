@@ -16,6 +16,12 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 import requests
 
+try:
+    from groq import Groq as _Groq
+    _GROQ_AVAILABLE = True
+except ImportError:
+    _GROQ_AVAILABLE = False
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 SITE     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -37,7 +43,7 @@ SUPPORTED_LANGS = {
     'sv': 'SV',
     'tr': 'TR',
     'el': 'EL',
-    'uk': 'UA',
+    'uk': 'UK',
     'ko': 'KO',
     'zh': 'ZH',
     'ja': 'JA',
@@ -46,6 +52,11 @@ SUPPORTED_LANGS = {
     'ar': 'AR',
     'hi': 'HI',
 }
+
+# Languages WowAI doesn't support — routed to Groq fallback instead
+WOWAI_UNSUPPORTED = {'hi'}
+# Languages to route through Groq LLM (must be in WOWAI_UNSUPPORTED)
+GROQ_LANGS = {'hi': 'Hindi'}
 
 LANG_LOCALE = {
     'ru': 'ru_RU',
@@ -150,6 +161,9 @@ def translate_batch(api_key: str, segments: list[str], target_lang: str, retries
     if not segments:
         return {}
 
+    if target_lang in WOWAI_UNSUPPORTED:
+        return {}
+
     lang_code = SUPPORTED_LANGS.get(target_lang, target_lang.upper())
     result = {}
 
@@ -202,6 +216,43 @@ def translate_batch(api_key: str, segments: list[str], target_lang: str, retries
                         break
                 except Exception:
                     time.sleep(2)
+
+    return result
+
+
+def translate_batch_groq(groq_key: str, segments: list[str], target_lang: str,
+                         lang_name: str, chunk_size: int = 50) -> dict:
+    """Translate segments via Groq LLM. Used as fallback for WowAI-unsupported langs."""
+    if not _GROQ_AVAILABLE or not groq_key or not segments:
+        return {}
+
+    client = _Groq(api_key=groq_key)
+    result = {}
+    chunks = [segments[i:i+chunk_size] for i in range(0, len(segments), chunk_size)]
+
+    for chunk in chunks:
+        numbered = '\n'.join(f'{i+1}. {s}' for i, s in enumerate(chunk))
+        prompt = (
+            f'Translate the following numbered phrases to {lang_name}. '
+            f'Return ONLY the numbered list with translations, preserving HTML tags exactly. '
+            f'No explanations.\n\n{numbered}'
+        )
+        try:
+            resp = client.chat.completions.create(
+                model='llama-3.3-70b-versatile',
+                messages=[{'role': 'user', 'content': prompt}],
+                temperature=0.1,
+                max_tokens=4096,
+            )
+            lines = resp.choices[0].message.content.strip().splitlines()
+            for line in lines:
+                m = re.match(r'^(\d+)\.\s+(.*)', line.strip())
+                if m:
+                    idx = int(m.group(1)) - 1
+                    if 0 <= idx < len(chunk):
+                        result[chunk[idx]] = m.group(2).strip()
+        except Exception as e:
+            print(f'    groq error: {e}')
 
     return result
 
@@ -663,7 +714,13 @@ def build_nav_cache(api_key: str, site_dir: str, target_langs: list,
 
     cache: dict[str, dict[str, str]] = {}
     for lang in target_langs:
-        raw = translate_batch(api_key, nav_list, lang)
+        if lang in GROQ_LANGS:
+            groq_key = os.environ.get('GROQ_API_KEY', '')
+            raw = translate_batch_groq(groq_key, nav_list, lang, GROQ_LANGS[lang])
+        elif lang in WOWAI_UNSUPPORTED:
+            raw = {}
+        else:
+            raw = translate_batch(api_key, nav_list, lang)
         filtered = {o: t for o, t in raw.items() if not _is_fake_translation(o, t, lang)}
         cache[lang] = filtered
         print(f'  [nav-cache] {lang}: {len(filtered)}/{len(nav_list)} strings cached')
@@ -718,7 +775,16 @@ def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: lis
             confirmed_langs.append(lang)
             continue
 
-        print(f'    → {lang}...', end=' ', flush=True)
+        use_groq = lang in GROQ_LANGS
+        if lang in WOWAI_UNSUPPORTED and not use_groq:
+            print(f'    → {lang}: skip (not supported by WowAI)')
+            continue
+
+        if use_groq and not _GROQ_AVAILABLE:
+            print(f'    → {lang}: skip (groq package not installed)')
+            continue
+
+        print(f'    → {lang} {"[groq]" if use_groq else ""}...', end=' ', flush=True)
 
         # Start with nav/footer cache for this language (avoids repeated API calls)
         lang_cache = nav_cache.get(lang, {}) if nav_cache else {}
@@ -726,7 +792,13 @@ def translate_page(api_key: str, src_path: str, rel_path: str, target_langs: lis
         # Only send segments not already in cache to the API
         uncached = [s for s in segments if s not in lang_cache]
         if uncached:
-            raw_translations = translate_batch(api_key, uncached, lang)
+            if use_groq:
+                groq_key = os.environ.get('GROQ_API_KEY', '')
+                raw_translations = translate_batch_groq(
+                    groq_key, uncached, lang, GROQ_LANGS[lang]
+                )
+            else:
+                raw_translations = translate_batch(api_key, uncached, lang)
         else:
             raw_translations = {}
 
