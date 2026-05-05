@@ -378,22 +378,42 @@ input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(99,102,241,.
 <div class="card">
   <div class="row2">
     <div class="field">
-      <label class="flabel">GitHub репозиторий <span style="font-weight:400;text-transform:none;letter-spacing:0">(для PR)</span></label>
-      <input type="text" id="repo" placeholder="username/repository">
-      <div class="fhint">Куда пушить результат. Оставь пустым — pipeline без PR.</div>
-    </div>
-    <div class="field">
       <label class="flabel">Домен сайта</label>
       <input type="text" id="domain" placeholder="example.com">
       <div class="fhint">Используется для canonical URL, sitemap и hreflang тегов.</div>
     </div>
+    <div class="field">
+      <label class="flabel">Куда выгрузить результат</label>
+      <div class="mode-tabs">
+        <div class="mode-tab active" data-out="server" onclick="setOutput(this)"
+          data-tip="Загружает файлы на сервер по SSH и обновляет nginx. Сайт сразу становится доступен.">
+          <span class="m-icon">🖥️</span><span class="m-name">Сервер</span>
+        </div>
+        <div class="mode-tab" data-out="github" onclick="setOutput(this)"
+          data-tip="Пушит изменения в GitHub-репозиторий и открывает Pull Request.">
+          <span class="m-icon">📂</span><span class="m-name">GitHub</span>
+        </div>
+        <div class="mode-tab" data-out="both" onclick="setOutput(this)"
+          data-tip="Деплоит на сервер и одновременно создаёт PR в GitHub.">
+          <span class="m-icon">🔀</span><span class="m-name">Оба</span>
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="field">
-    <label class="flabel">GitHub токен</label>
-    <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxxxxxx">
-    <div class="fhint">
-      Нужен чтобы запушить изменения в GitHub-репозиторий и открыть Pull Request.
-      Получить: <a href="https://github.com/settings/tokens/new?scopes=repo" target="_blank">github.com → Settings → Tokens → repo scope</a>
+  <div id="github-fields" style="display:none">
+    <div class="row2">
+      <div class="field">
+        <label class="flabel">GitHub репозиторий <span style="font-weight:400;text-transform:none;letter-spacing:0">(для PR)</span></label>
+        <input type="text" id="repo" placeholder="username/repository">
+        <div class="fhint">Куда пушить результат.</div>
+      </div>
+      <div class="field">
+        <label class="flabel">GitHub токен</label>
+        <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxxxxxx">
+        <div class="fhint">
+          <a href="https://github.com/settings/tokens/new?scopes=repo" target="_blank">Получить токен →</a>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -529,9 +549,10 @@ input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(99,102,241,.
 </div><!-- /page -->
 
 <script>
-let selMode = 'full';
-let selSrc  = 'zip';
-let langMode = 'all';
+let selMode   = 'full';
+let selSrc    = 'zip';
+let selOutput = 'server';
+let langMode  = 'all';
 
 /* ── Source tabs ── */
 function setSrc(el) {
@@ -544,9 +565,18 @@ function setSrc(el) {
 
 /* ── Mode tabs ── */
 function setMode(el) {
-  document.querySelectorAll('.mode-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('[data-mode]').forEach(t => t.classList.remove('active'));
   el.classList.add('active');
   selMode = el.dataset.mode;
+}
+
+/* ── Output tabs ── */
+function setOutput(el) {
+  document.querySelectorAll('[data-out]').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  selOutput = el.dataset.out;
+  document.getElementById('github-fields').style.display =
+    (selOutput === 'github' || selOutput === 'both') ? '' : 'none';
 }
 
 /* ── File upload ── */
@@ -662,7 +692,8 @@ async function startJob() {
   logCard.scrollIntoView({ behavior:'smooth', block:'start' });
 
   const fd = new FormData();
-  fd.append('source_type', selSrc);
+  fd.append('source_type',   selSrc);
+  fd.append('output_target', selOutput);
   fd.append('repo',   repo);
   fd.append('token',  token);
   fd.append('domain', domain);
@@ -719,13 +750,20 @@ function listenLogs(jobId, btn, btnText, domain) {
       es.close(); setProg(100); setTimeout(() => setProg(0), 900);
       document.getElementById('stop-btn').classList.add('hidden');
       _currentJobId = null;
-      const pr = line.slice(5).trim();
+      const parts      = line.slice(5).split(':');
+      const pr         = parts[0].trim();
+      const deployUrl  = parts[1] ? parts[1].trim() : '';
       const res = document.getElementById('result');
       res.classList.remove('hidden');
       res.className = 'res-banner ok';
-      res.innerHTML = pr
-        ? `<span class="res-ico">🎉</span><span class="res-txt">Pull Request создан для <strong>${domain}</strong><br><a href="${pr}" target="_blank">${pr}</a></span><a class="res-btn" href="${pr}" target="_blank">Открыть PR →</a>`
-        : `<span class="res-ico">✅</span><span class="res-txt">Pipeline завершён для <strong>${domain}</strong> (без PR)</span>`;
+      let html = '';
+      if (deployUrl)
+        html += `<span class="res-ico">🖥️</span><span class="res-txt">Задеплоено: <a href="${deployUrl}" target="_blank">${deployUrl}</a></span><a class="res-btn" href="${deployUrl}" target="_blank">Открыть →</a>`;
+      if (pr)
+        html += `<span class="res-ico">🎉</span><span class="res-txt">Pull Request: <a href="${pr}" target="_blank">${pr}</a></span>`;
+      if (!html)
+        html = `<span class="res-ico">✅</span><span class="res-txt">Pipeline завершён для <strong>${domain}</strong></span>`;
+      res.innerHTML = html;
       document.getElementById('log-dot').className = 'log-dot done';
       document.getElementById('log-titl').textContent = 'Завершено';
       btn.disabled = false; btn.classList.remove('loading'); btnText.textContent = 'Запустить ещё';
@@ -1015,7 +1053,8 @@ def _find_site_root(tmp_dir):
 # ── Pipeline thread ───────────────────────────────────────────────────────────
 
 def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
-                     domain, repo, token, mode, langs_str, stop_event=None):
+                     domain, repo, token, mode, langs_str, stop_event=None,
+                     output_target='server'):
     job = _jobs[job_id]
 
     def log_fn(msg):
@@ -1079,9 +1118,19 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
         else:
             log_fn('✅ Pipeline завершён')
 
-        # ── Phase 3: Pull Request ─────────────────────────────────────────────
-        pr_url = None
-        if repo:
+        # ── Phase 3: Deploy / PR ──────────────────────────────────────────────
+        pr_url     = None
+        deploy_ok  = False
+        do_deploy  = output_target in ('server', 'both')
+        do_github  = output_target in ('github', 'both')
+
+        if do_deploy:
+            log_fn('')
+            log_fn('🖥️ Деплою на сервер...')
+            from deploy import deploy_to_server
+            deploy_ok = deploy_to_server(site_dir, domain, log_fn=log_fn)
+
+        if do_github and repo:
             log_fn('')
             pr_url = _create_pr_sync(tmp_dir, site_dir, repo, langs, token, log_fn)
             if pr_url:
@@ -1089,7 +1138,9 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
 
         job['status'] = 'done'
         job['result'] = pr_url
-        log_fn(f'DONE:{pr_url or ""}')
+        job['deployed'] = deploy_ok
+        deploy_url = f'http://{domain}/' if deploy_ok else ''
+        log_fn(f'DONE:{pr_url or ""}:{deploy_url}')
 
     except Exception as e:
         import traceback
@@ -1127,9 +1178,10 @@ def start():
         repo = repo[len('https://github.com/'):]
     elif repo.startswith('github.com/'):
         repo = repo[len('github.com/'):]
-    token  = request.form.get('token', '').strip() or GITHUB_TOKEN
-    mode   = request.form.get('mode', 'full')
-    langs  = request.form.get('langs', 'all')
+    token         = request.form.get('token', '').strip() or GITHUB_TOKEN
+    mode          = request.form.get('mode', 'full')
+    langs         = request.form.get('langs', 'all')
+    output_target = request.form.get('output_target', 'server')
 
     if not domain:
         return jsonify({'error': 'Укажи домен сайта'}), 400
@@ -1173,7 +1225,7 @@ def start():
     threading.Thread(
         target=_pipeline_thread,
         args=(job_id, source_type, source_value, tmp_dir, domain, repo, token, mode, langs,
-              stop_event),
+              stop_event, output_target),
         daemon=True,
     ).start()
 

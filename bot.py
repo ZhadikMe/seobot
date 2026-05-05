@@ -1179,16 +1179,29 @@ async def _run_archive_fixes(message: Message, state: FSMContext):
     else:
         pr_url = None
 
+    # ── Deploy to server ──────────────────────────────────────────────────────
+    deploy_domain = data.get('archive_domain') or data.get('domain')
+    deploy_ok = False
+    if deploy_domain:
+        await bot.edit_message_text(
+            text='🚀 Деплою на сервер...', chat_id=_chat_id, message_id=_msg_id
+        )
+        loop = asyncio.get_event_loop()
+        from deploy import deploy_to_server
+        deploy_ok = await loop.run_in_executor(
+            None, lambda: deploy_to_server(site_dir, deploy_domain, log_fn=log.info)
+        )
+
     # ── Done ──────────────────────────────────────────────────────────────────
+    deploy_line = f'\n🌐 http://{deploy_domain}/' if deploy_ok else ''
     if pr_url:
         result_text = (f'✅ *Готово!*\n\nPull Request создан:\n{pr_url}\n\n'
-                       f'Проверь изменения и нажми Merge.' + delta_text)
+                       f'Проверь изменения и нажми Merge.' + deploy_line + delta_text)
     elif target_repo:
         result_text = (f'✅ *SEO применены.*\n\n'
-                       f'❌ PR не создан — ошибка GitHub API.' + delta_text)
+                       f'❌ PR не создан — ошибка GitHub API.' + deploy_line + delta_text)
     else:
-        result_text = (f'✅ *SEO применены.*\n\n'
-                       f'ℹ️ PR не создан — репозиторий не был указан.' + delta_text)
+        result_text = (f'✅ *SEO применены.*' + deploy_line + delta_text)
 
     await bot.edit_message_text(
         text=result_text, chat_id=_chat_id, message_id=_msg_id, parse_mode='Markdown'
