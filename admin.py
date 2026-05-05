@@ -539,7 +539,7 @@ input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(99,102,241,.
     <div class="log-dot running" id="log-dot"></div>
     <span class="log-titl" id="log-titl">Выполняется...</span>
     <span class="log-dom" id="log-dom"></span>
-    <button class="btn-stop hidden" id="stop-btn" onclick="stopJob()">⏹ Stop &amp; Push PR</button>
+    <button class="btn-stop hidden" id="stop-btn" onclick="stopJob()">⏹ Стоп и применить</button>
   </div>
   <div class="prog-wrap on" id="prog-wrap"><div class="prog-bar" id="prog-bar"></div></div>
   <div class="log-area" id="log"></div>
@@ -653,7 +653,7 @@ function stopJob() {
   if (!_currentJobId) return;
   const btn = document.getElementById('stop-btn');
   btn.disabled = true;
-  btn.textContent = 'Stopping...';
+  btn.textContent = 'Останавливаю...';
   fetch('/stop/' + _currentJobId, { method: 'POST' });
 }
 
@@ -716,7 +716,7 @@ async function startJob() {
   _currentJobId = data.job_id;
   document.getElementById('stop-btn').classList.remove('hidden');
   document.getElementById('stop-btn').disabled = false;
-  document.getElementById('stop-btn').textContent = '⏹ Stop & Push PR';
+  document.getElementById('stop-btn').textContent = '⏹ Стоп и применить';
   listenLogs(data.job_id, btn, btnText, domain);
 }
 
@@ -842,7 +842,7 @@ async function checkActiveJob() {
     const stopBtn = document.getElementById('stop-btn');
     stopBtn.classList.remove('hidden');
     stopBtn.disabled = false;
-    stopBtn.textContent = '⏹ Stop & Push PR';
+    stopBtn.textContent = '⏹ Стоп и применить';
 
     listenLogs(job.job_id, btn, btnText, job.domain);
   } catch(e) { /* no active jobs or server unavailable */ }

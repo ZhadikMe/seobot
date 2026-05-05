@@ -61,7 +61,7 @@ TRANSLATE_STEPS = [
 
 
 def run_pipeline(site_dir: str, domain: str, mode: str = 'full', langs: list = None,
-                 stop_event=None):
+                 stop_event=None, deploy: bool = False):
     from fixes import run_all_fixes
     from translate import detect_source_lang
     from audit import run_audit_on_dir
@@ -128,7 +128,7 @@ def run_pipeline(site_dir: str, domain: str, mode: str = 'full', langs: list = N
     log.info(f'Проблем после исправлений: {audit_after["failed"]} / {audit_after["total"]} страниц')
     log.info(f'=== Завершено: {site_dir} ===\n')
 
-    if domain:
+    if deploy and domain:
         from deploy import deploy_to_server
         deploy_to_server(site_dir, domain, log_fn=log.info)
 

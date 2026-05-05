@@ -12,9 +12,14 @@ Env vars:
   3. Распаковывает в /var/www/<domain>/
   4. Создаёт nginx-конфиг если его нет, включает сайт
   5. nginx -t && systemctl reload nginx
+
+Если бот запущен на том же сервере — SSH не нужен, файлы копируются напрямую.
 """
 import io
 import os
+import shutil
+import socket
+import subprocess
 import tarfile
 import tempfile
 
@@ -33,6 +38,53 @@ server {{
     }}
 }}
 """
+
+
+def _is_local_host(host: str) -> bool:
+    """Return True if host resolves to an IP of this machine."""
+    if host in ('localhost', '127.0.0.1', '::1'):
+        return True
+    try:
+        target_ips = {info[4][0] for info in socket.getaddrinfo(host, None)}
+        local_ips  = {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None)}
+        local_ips.update({'127.0.0.1', '::1'})
+        return bool(target_ips & local_ips)
+    except Exception:
+        return False
+
+
+def _deploy_local(site_dir: str, domain: str, log_fn):
+    """Copy files directly when the bot runs on the target server."""
+    web_root = f'/var/www/{domain}'
+    log_fn(f'[deploy] Локальный деплой → {web_root}')
+    os.makedirs(web_root, exist_ok=True)
+    for item in os.listdir(site_dir):
+        src = os.path.join(site_dir, item)
+        dst = os.path.join(web_root, item)
+        if os.path.isdir(src):
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+
+    nginx_avail  = f'/etc/nginx/sites-available/{domain}'
+    nginx_enabled = f'/etc/nginx/sites-enabled/{domain}'
+    if not os.path.exists(nginx_avail):
+        log_fn(f'[deploy] Создаю nginx-конфиг для {domain}...')
+        with open(nginx_avail, 'w') as f:
+            f.write(NGINX_TEMPLATE.format(domain=domain))
+        if not os.path.exists(nginx_enabled):
+            os.symlink(nginx_avail, nginx_enabled)
+
+    log_fn('[deploy] Перезагружаю nginx...')
+    r = subprocess.run('nginx -t 2>&1 && systemctl reload nginx',
+                       shell=True, capture_output=True, text=True)
+    if r.returncode != 0:
+        log_fn(f'[deploy] nginx ошибка: {r.stdout or r.stderr}')
+        return False
+    log_fn(f'[deploy] ✅ Сайт доступен: http://{domain}/')
+    return True
 
 
 def _connect():
@@ -64,6 +116,9 @@ def deploy_to_server(site_dir: str, domain: str, log_fn=None):
     def log(msg):
         if log_fn:
             log_fn(msg)
+
+    if _is_local_host(SSH_HOST):
+        return _deploy_local(site_dir, domain, log)
 
     try:
         import paramiko  # noqa — проверка наличия
