@@ -1337,6 +1337,26 @@ def job_status(job_id):
     })
 
 
+@app.route('/webhook', methods=['POST'])
+def github_webhook():
+    """Auto-deploy: git pull + systemctl restart on GitHub push."""
+    import hmac, hashlib
+    secret = os.environ.get('WEBHOOK_SECRET', '').encode()
+    if secret:
+        sig = request.headers.get('X-Hub-Signature-256', '')
+        expected = 'sha256=' + hmac.new(secret, request.data, hashlib.sha256).hexdigest()  # noqa — hmac.new alias
+        if not hmac.compare_digest(sig, expected):
+            return jsonify({'error': 'bad signature'}), 403
+
+    def _deploy():
+        repo_dir = os.path.dirname(os.path.abspath(__file__))
+        subprocess.run(['git', '-C', repo_dir, 'pull', '--ff-only'], capture_output=True)
+        subprocess.run(['systemctl', 'restart', 'seobot'], capture_output=True)
+
+    threading.Thread(target=_deploy, daemon=True).start()
+    return jsonify({'ok': True})
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT') or os.environ.get('ADMIN_PORT', 8080))
     print(f'\n  SEO Admin Panel → http://localhost:{port}\n')
