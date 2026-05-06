@@ -499,13 +499,7 @@ def _generate_seo_content(page_name: str, site_name: str, context: str,
                 return result
         except Exception:
             pass
-    # Fallback generic template
-    return (
-        f'<p>Welcome to {site_name}. Explore our {page_name.lower()} section '
-        f'to discover more about what we offer.</p>\n'
-        f'<p>We are committed to quality and customer satisfaction. '
-        f'Feel free to browse our pages or contact us with any questions.</p>'
-    )
+    return ''
 
 
 def _make_h1_text(title: str, snippet: str, groq_api_key: str = None) -> str:
@@ -752,6 +746,8 @@ def fix_thin_content(site_dir: str, langs: list, groq_api_key: str = None) -> No
                 body_text = re.sub(r'\s+', ' ', body_text).strip()[:400]
 
                 content = _generate_seo_content(page_name, site_name, body_text, groq_api_key)
+                if not content:
+                    continue
                 block   = f'<div class="seo-extra">\n{content}\n</div>'
 
                 # Insert before </main>, </article>, or </body>
