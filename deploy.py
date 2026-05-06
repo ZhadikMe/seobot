@@ -46,8 +46,14 @@ def _is_local_host(host: str) -> bool:
         return True
     try:
         target_ips = {info[4][0] for info in socket.getaddrinfo(host, None)}
-        local_ips  = {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None)}
+        # Check hostname resolution
+        local_ips = {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None)}
         local_ips.update({'127.0.0.1', '::1'})
+        if target_ips & local_ips:
+            return True
+        # Also check all IPs assigned to network interfaces (catches public IPs on VPS)
+        r = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
+        local_ips.update(r.stdout.split())
         return bool(target_ips & local_ips)
     except Exception:
         return False

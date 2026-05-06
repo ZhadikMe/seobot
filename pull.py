@@ -158,20 +158,20 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         '--timeout=30',
         '--dns-timeout=5',    # don't hang 30s per dead domain DNS lookup
         '--tries=3',
-        '--wait=3',           # 3 sec between requests — avoids archive.org rate limiting on cloud IPs
-        '--random-wait',      # randomise 0.5x–1.5x wait (1.5–4.5 sec) so it looks less like a bot
+        '--wait=1',           # 1 sec between requests (DigitalOcean dedicated IP, less aggressive than shared cloud)
+        '--random-wait',      # randomise 0.5x–1.5x wait (0.5–1.5 sec)
         '--reject-regex', r'/(wp-json|wp-admin|wp-login|xmlrpc|feed|rss|sitemap\.xml|\?s=|\?p=|/page/\d)',
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         '-e', 'robots=off',
         f'--directory-prefix={tmp_dir}',
     ]
 
-    # Asset time limit: ~5 sec/URL (--wait=3 + page-requisites overhead) + 5 min buffer, min 10 min
+    # Asset time limit: ~2 sec/URL (--wait=1 + page-requisites overhead) + 3 min buffer, min 5 min
     if total_estimated:
-        asset_limit_sec = max(600, int(total_estimated * 5) + 300)
+        asset_limit_sec = max(300, int(total_estimated * 2) + 180)
         print(f'Скачиваем {wget_host} (лимит ресурсов {round(asset_limit_sec/60)} мин)...')
     else:
-        asset_limit_sec = 1800  # 30 min default
+        asset_limit_sec = 600  # 10 min default
         print(f'Скачиваем {wget_host} (лимит ресурсов 30 мин)...')
 
     saved_re = re.compile(r'saved \[')
@@ -182,39 +182,59 @@ def download_snapshot(archive_url: str, tmp_dir: str, domain_no_www: str, wget_h
         """Run wget with extra_flags, return number of files saved."""
         cmd = [_get_wget()] + base_flags + extra_flags + [archive_url]
         print(f'  wget cmd: {" ".join(cmd[:8])} ...')  # log first 8 args for debugging
-        count = 0
-        timed_out = False
-        phase_start = time.time()   # each pass has its own clock
-        proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True,
-                                encoding='utf-8', errors='replace')
-        saved_files: list[str] = []
-        error_re = re.compile(r'ERROR\s+\d+|failed:|Unable to|cannot open', re.IGNORECASE)
-        for line in proc.stderr:
-            line_s = line.rstrip()
-            if saved_re.search(line_s):
-                count += 1
-                total_done = count_offset + count
-                # Extract saved filename for logging
-                fname_m = re.search(r'"([^"]+)"', line_s)
-                if fname_m:
-                    saved_files.append(fname_m.group(1))
-                print(f'\r  {label}: {count} файлов', end='', flush=True)
-                if progress_cb and total_done % 10 == 0:
-                    try:
-                        progress_cb(total_done, total_estimated)
-                    except Exception:
-                        pass
-            elif error_re.search(line_s):
-                print(f'\n  [wget error] {line_s}')
-            if phase_limit_sec and (time.time() - phase_start) > phase_limit_sec:
-                proc.kill()
-                timed_out = True
-                break
-        proc.wait()
-        if timed_out:
-            elapsed = round((time.time() - phase_start) / 60, 1)
-            print(f'\r  [warn] Лимит времени ({elapsed} мин) — остановлено на {count} файлах')
-        # Log sample of what was saved (useful for diagnosing missing CSS/images)
+
+        for attempt in range(3):
+            count = 0
+            timed_out = False
+            got_429 = False
+            phase_start = time.time()
+            proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True,
+                                    encoding='utf-8', errors='replace')
+            saved_files: list[str] = []
+            error_re = re.compile(r'ERROR\s+\d+|failed:|Unable to|cannot open', re.IGNORECASE)
+            block_re  = re.compile(r'429|Connection refused|Connection timed out|timed out', re.IGNORECASE)
+            for line in proc.stderr:
+                line_s = line.rstrip()
+                if saved_re.search(line_s):
+                    count += 1
+                    total_done = count_offset + count
+                    fname_m = re.search(r'"([^"]+)"', line_s)
+                    if fname_m:
+                        saved_files.append(fname_m.group(1))
+                    print(f'\r  {label}: {count} файлов', end='', flush=True)
+                    if progress_cb and total_done % 10 == 0:
+                        try:
+                            progress_cb(total_done, total_estimated)
+                        except Exception:
+                            pass
+                elif block_re.search(line_s):
+                    got_429 = True
+                    print(f'\n  [wget error] {line_s}')
+                elif error_re.search(line_s):
+                    print(f'\n  [wget error] {line_s}')
+                if phase_limit_sec and (time.time() - phase_start) > phase_limit_sec:
+                    proc.kill()
+                    timed_out = True
+                    break
+            proc.wait()
+            if timed_out:
+                elapsed = round((time.time() - phase_start) / 60, 1)
+                print(f'\r  [warn] Лимит времени ({elapsed} мин) — остановлено на {count} файлах')
+
+            if got_429 and count == 0 and attempt < 2:
+                wait_sec = 60 * (attempt + 1)
+                print(f'  [warn] archive.org вернул 429 — пауза {wait_sec} сек перед повтором...')
+                time.sleep(wait_sec)
+                continue  # retry
+
+            if got_429 and count == 0:
+                raise RuntimeError(
+                    'archive.org блокирует этот IP (rate limit / connection refused). '
+                    'Подожди 20–30 минут и попробуй снова.'
+                )
+            break  # success or non-429 result
+
+        # Log sample of what was saved
         css_saved = [f for f in saved_files if f.endswith(('.css', '.js', '.png', '.jpg', '.svg'))]
         if css_saved:
             print(f'\n  Примеры скачанных ресурсов ({len(css_saved)}):')
@@ -761,8 +781,8 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str, s
     domain_variants = [domain_no_www, www_domain] if www_domain != domain_no_www else [domain_no_www]
 
     # Brief pause before starting recovery — wget phase may have exhausted rate limit budget
-    print('  Пауза 60 сек перед recover (anti-rate-limit)...')
-    time.sleep(60)
+    print('  Пауза 10 сек перед recover (anti-rate-limit)...')
+    time.sleep(10)
 
     # Sort by priority: uploads/ and themes/ first (real site content),
     # plugins/ last (third-party assets frequently not archived → waste requests)
@@ -803,16 +823,16 @@ def _recover_missing_assets(site_dir: str, domain_no_www: str, timestamp: str, s
                     recovered += 1
                     downloaded = True
                     print(f'  [recover] OK: {abs_path}')
-                    time.sleep(4)
+                    time.sleep(2)
                     break
                 except urllib.error.HTTPError as e:
                     domain_failed = True
                     print(f'  [recover] {url}: HTTP {e.code}')
-                    time.sleep(3)
+                    time.sleep(1)
                 except Exception as e:
                     domain_failed = True
                     print(f'  [recover] {url}: {e}')
-                    time.sleep(15)
+                    time.sleep(5)
 
         if downloaded:
             consecutive_not_downloaded = 0
