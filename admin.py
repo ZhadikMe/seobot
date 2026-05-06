@@ -1159,7 +1159,7 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
 
         # ── Phase 3: Deploy / PR ──────────────────────────────────────────────
         pr_url     = None
-        deploy_ok  = False
+        deploy_url = ''
         do_deploy  = output_target in ('server', 'both')
         do_github  = output_target in ('github', 'both')
 
@@ -1168,8 +1168,10 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
             log_fn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
             log_fn('🖥️ Фаза 3: деплой на сервер...')
             from deploy import deploy_to_server
-            deploy_ok = deploy_to_server(site_dir, domain, log_fn=log_fn)
-            if not deploy_ok:
+            result = deploy_to_server(site_dir, domain, log_fn=log_fn)
+            if result and result is not False:
+                deploy_url = result  # URL вида http://host:port/
+            else:
                 log_fn('DEPLOY_FAIL:')
 
         if do_github and repo:
@@ -1180,8 +1182,7 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
 
         job['status'] = 'done'
         job['result'] = pr_url
-        job['deployed'] = deploy_ok
-        deploy_url = f'http://{domain}/' if deploy_ok else ''
+        job['deployed'] = bool(deploy_url)
         log_fn(f'DONE:{pr_url or ""}:{deploy_url}')
 
     except Exception as e:

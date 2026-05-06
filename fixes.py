@@ -479,7 +479,7 @@ def _generate_seo_content(page_name: str, site_name: str, context: str,
     """Generate 2-3 supplementary paragraphs for a thin page via Groq, or use a fallback."""
     if groq_api_key and context:
         prompt = (
-            f'Write 2-3 short paragraphs (total ~150 words) to supplement this webpage.\n'
+            f'Write 3-4 paragraphs (total 200-250 words) to supplement this webpage.\n'
             f'Page: "{page_name}" on site "{site_name}"\n'
             f'Existing content excerpt: {context}\n'
             f'Requirements: plain HTML <p> tags only, relevant to the page topic, '
@@ -487,7 +487,7 @@ def _generate_seo_content(page_name: str, site_name: str, context: str,
         )
         try:
             result = _groq_call(groq_api_key, [{'role': 'user', 'content': prompt}],
-                                max_tokens=300, temperature=0.7)
+                                max_tokens=400, temperature=0.7)
             result = result.strip()
             if len(result) > 80:
                 if not result.startswith('<p'):
