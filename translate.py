@@ -220,10 +220,17 @@ def translate_batch(api_key: str, segments: list[str], target_lang: str, retries
     return result
 
 
+_GROQ_TPD_EXHAUSTED = False  # set True when daily token limit hit; skip remaining chunks
+
+
 def translate_batch_groq(groq_key: str, segments: list[str], target_lang: str,
                          lang_name: str, chunk_size: int = 50) -> dict:
     """Translate segments via Groq LLM. Used as fallback for WowAI-unsupported langs."""
+    global _GROQ_TPD_EXHAUSTED
     if not _GROQ_AVAILABLE or not groq_key or not segments:
+        return {}
+    if _GROQ_TPD_EXHAUSTED:
+        print(f'    groq: daily token limit exhausted — skipping {lang_name}')
         return {}
 
     client = _Groq(api_key=groq_key)
@@ -231,6 +238,8 @@ def translate_batch_groq(groq_key: str, segments: list[str], target_lang: str,
     chunks = [segments[i:i+chunk_size] for i in range(0, len(segments), chunk_size)]
 
     for chunk in chunks:
+        if _GROQ_TPD_EXHAUSTED:
+            break
         numbered = '\n'.join(f'{i+1}. {s}' for i, s in enumerate(chunk))
         prompt = (
             f'Translate the following numbered phrases to {lang_name}. '
@@ -252,6 +261,11 @@ def translate_batch_groq(groq_key: str, segments: list[str], target_lang: str,
                     if 0 <= idx < len(chunk):
                         result[chunk[idx]] = m.group(2).strip()
         except Exception as e:
+            err_str = str(e).lower()
+            if '429' in err_str and ('tokens per day' in err_str or 'tpd' in err_str or 'daily' in err_str):
+                _GROQ_TPD_EXHAUSTED = True
+                print(f'    groq: daily token limit (TPD) hit — skipping remaining {lang_name} chunks')
+                break
             print(f'    groq error: {e}')
 
     return result
