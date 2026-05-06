@@ -129,14 +129,42 @@ def run_pipeline(site_dir: str, domain: str, mode: str = 'full', langs: list = N
             break
 
     audit_after = run_audit_on_dir(site_dir)
-    log.info(f'Проблем после исправлений: {audit_after["failed"]} / {audit_after["total"]} страниц')
+
+    _LABELS = {
+        'no_title':    'Нет title',
+        'no_desc':     'Нет description',
+        'no_h1':       'Нет H1',
+        'no_h2':       'Нет H2',
+        'no_canonical':'Нет canonical',
+        'no_og_image': 'Нет og:image',
+        'no_schema':   'Нет schema',
+        'thin_content':'Тонкий контент',
+        'few_links':   'Мало ссылок',
+    }
+    bc, ac = audit_before['counts'], audit_after['counts']
+    rows = [(lbl, bc.get(k, 0), ac.get(k, 0)) for k, lbl in _LABELS.items() if bc.get(k) or ac.get(k)]
+    if rows:
+        log.info('┌─────────────────────┬────┬────┐')
+        log.info('│ Проблема            │ До │ П/с│')
+        log.info('├─────────────────────┼────┼────┤')
+        for lbl, b, a in rows:
+            mark = ' ✅' if a == 0 and b > 0 else (' ⚠' if a > 0 else '')
+            log.info(f'│ {lbl:<19} │ {b:>2} │ {a:>2}{mark:<2}│')
+        log.info('└─────────────────────┴────┴────┘')
+    log.info(f'Страниц с проблемами: {audit_before["failed"]} → {audit_after["failed"]} / {audit_after["total"]}')
     log.info(f'=== Завершено: {site_dir} ===\n')
 
     if deploy and domain:
         from deploy import deploy_to_server
         deploy_to_server(site_dir, domain, log_fn=log.info)
 
-    return {'before': audit_before['failed'], 'after': audit_after['failed']}
+    return {
+        'before': audit_before['failed'],
+        'after':  audit_after['failed'],
+        'counts_before': bc,
+        'counts_after':  ac,
+        'total': audit_after['total'],
+    }
 
 
 def main():

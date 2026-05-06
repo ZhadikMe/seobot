@@ -1153,7 +1153,23 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
         if cancelled:
             log_fn('⏹ Pipeline прерван по запросу — создаю PR с текущим прогрессом...')
         elif result:
-            log_fn(f'✅ Pipeline завершён. Проблем: {result["before"]} → {result["after"]}')
+            _LABELS = {
+                'no_title':'Нет title','no_desc':'Нет description','no_h1':'Нет H1',
+                'no_h2':'Нет H2','no_canonical':'Нет canonical','no_og_image':'Нет og:image',
+                'no_schema':'Нет schema','thin_content':'Тонкий контент','few_links':'Мало ссылок',
+            }
+            bc = result.get('counts_before', {})
+            ac = result.get('counts_after', {})
+            rows = [(lbl, bc.get(k,0), ac.get(k,0)) for k,lbl in _LABELS.items() if bc.get(k) or ac.get(k)]
+            if rows:
+                log_fn('┌─────────────────────┬────┬────┐')
+                log_fn('│ Проблема            │ До │ П/с│')
+                log_fn('├─────────────────────┼────┼────┤')
+                for lbl, b, a in rows:
+                    mark = ' ✅' if a == 0 and b > 0 else (' ⚠' if a > 0 else '')
+                    log_fn(f'│ {lbl:<19} │ {b:>2} │ {a:>2}{mark:<2}│')
+                log_fn('└─────────────────────┴────┴────┘')
+            log_fn(f'✅ Pipeline завершён. Страниц с проблемами: {result["before"]} → {result["after"]} / {result.get("total","?")}')
         else:
             log_fn('✅ Pipeline завершён')
 
