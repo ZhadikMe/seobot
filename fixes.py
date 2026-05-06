@@ -677,18 +677,13 @@ def _make_h2_text(html: str, groq_api_key: str = None) -> str:
 
 def fix_thin_content(site_dir: str, langs: list, groq_api_key: str = None) -> None:
     """
-    Add content to pages with thin content (<200 words).
-
-    Two branches:
-    1. WordPress archive pages (H1 contains "Archives:") — inserts hardcoded intro/outro.
-    2. Generic thin pages (any site) — generates contextual content via Groq,
-       falls back to a simple template.
+    Add content to WordPress archive pages with thin content (<200 words).
+    Generic thin pages are skipped (reported by audit only).
     """
     from audit import _count_words
 
     SKIP = set(LANG_DIRS + ARCHIVE_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules'])
-    INTRO_MARKER  = 'class="archive-intro"'
-    GENERIC_MARKER = 'class="seo-extra"'
+    INTRO_MARKER = 'class="archive-intro"'
 
     INTRO_EN = ('<p class="archive-intro">{site_name} publishes personal blog posts about music, '
                 'creativity, and daily life. Browse the entries below from this archive period — '
@@ -696,8 +691,7 @@ def fix_thin_content(site_dir: str, langs: list, groq_api_key: str = None) -> No
     OUTRO_EN = ('<p class="archive-outro">Explore more posts in other archive sections, '
                 'or visit the main blog for the latest updates.</p>')
 
-    pages_added  = {}  # rel → (intro_text, outro_text)   — WordPress branch
-    generic_added = {}  # rel → block_html                 — generic branch
+    pages_added = {}  # rel → (intro_text, outro_text)
 
     # ── Pass 1: walk EN pages ─────────────────────────────────────────────────
     for root, dirs, files in os.walk(site_dir):
@@ -708,8 +702,8 @@ def fix_thin_content(site_dir: str, langs: list, groq_api_key: str = None) -> No
             fpath = os.path.join(root, fname)
             html  = open(fpath, encoding='utf-8', errors='ignore').read()
 
-            if INTRO_MARKER in html or GENERIC_MARKER in html:
-                continue  # already patched
+            if INTRO_MARKER in html:
+                continue
 
             if _count_words(html) >= 200:
                 continue
@@ -717,53 +711,27 @@ def fix_thin_content(site_dir: str, langs: list, groq_api_key: str = None) -> No
             title_m   = re.search(r'<title>([^<]+)</title>', html)
             title     = title_m.group(1).strip() if title_m else ''
             site_name = re.split(r'\s*[|»:–—]\s*', title)[-1].strip() if title else 'This site'
-            page_name = re.split(r'\s*[|»:–—]\s*', title)[0].strip() if title else fname
 
             h1_m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.IGNORECASE | re.DOTALL)
             h1   = re.sub(r'<[^>]+>', '', h1_m.group(1)).strip() if h1_m else ''
 
-            # ── Branch A: WordPress archive ───────────────────────────────────
-            if re.search(r'[Aa]rchives?:', h1):
-                intro = INTRO_EN.format(site_name=site_name)
-                outro = OUTRO_EN
+            if not re.search(r'[Aa]rchives?:', h1):
+                continue  # only WordPress archive pages
 
-                h1_end = re.search(r'</h1>', html, re.IGNORECASE)
-                if not h1_end:
-                    continue
-                html = html[:h1_end.end()] + '\n' + intro + html[h1_end.end():]
-                nav_m = re.search(r'<nav[^>]*class="[^"]*navigation[^"]*"', html, re.IGNORECASE)
-                if nav_m:
-                    html = html[:nav_m.start()] + outro + '\n' + html[nav_m.start():]
+            intro = INTRO_EN.format(site_name=site_name)
+            outro = OUTRO_EN
 
-                with open(fpath, 'w', encoding='utf-8') as f:
-                    f.write(html)
-                pages_added[os.path.relpath(fpath, site_dir)] = (intro, outro)
+            h1_end = re.search(r'</h1>', html, re.IGNORECASE)
+            if not h1_end:
+                continue
+            html = html[:h1_end.end()] + '\n' + intro + html[h1_end.end():]
+            nav_m = re.search(r'<nav[^>]*class="[^"]*navigation[^"]*"', html, re.IGNORECASE)
+            if nav_m:
+                html = html[:nav_m.start()] + outro + '\n' + html[nav_m.start():]
 
-            # ── Branch B: generic thin page ───────────────────────────────────
-            else:
-                body_m    = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
-                body_text = re.sub(r'<[^>]+>', ' ', body_m.group(1) if body_m else html)
-                body_text = re.sub(r'\s+', ' ', body_text).strip()[:400]
-
-                content = _generate_seo_content(page_name, site_name, body_text, groq_api_key)
-                if not content:
-                    continue
-                block   = f'<div class="seo-extra">\n{content}\n</div>'
-
-                # Insert before </main>, </article>, or </body>
-                inserted = False
-                for end_tag in ('</main>', '</article>', '</body>'):
-                    pos = html.lower().rfind(end_tag)
-                    if pos >= 0:
-                        html = html[:pos] + block + '\n' + html[pos:]
-                        inserted = True
-                        break
-                if not inserted:
-                    html = html + '\n' + block
-
-                with open(fpath, 'w', encoding='utf-8') as f:
-                    f.write(html)
-                generic_added[os.path.relpath(fpath, site_dir)] = content
+            with open(fpath, 'w', encoding='utf-8') as f:
+                f.write(html)
+            pages_added[os.path.relpath(fpath, site_dir)] = (intro, outro)
 
     # ── Pass 2: translate WordPress archive pages ─────────────────────────────
     if pages_added and groq_api_key:
@@ -806,45 +774,6 @@ def fix_thin_content(site_dir: str, langs: list, groq_api_key: str = None) -> No
                 except Exception:
                     pass
 
-    # ── Pass 3: translate generic thin pages ──────────────────────────────────
-    if generic_added and groq_api_key:
-        unique_blocks = list(dict.fromkeys(generic_added.values()))
-
-        for lang in langs:
-            lang_dir = os.path.join(site_dir, lang)
-            if not os.path.isdir(lang_dir):
-                continue
-            lang_name = _GROQ_LANG_NAMES.get(lang, lang)
-            try:
-                translated   = _groq_translate_batch(groq_api_key, unique_blocks, lang_name)
-                block_map    = dict(zip(unique_blocks, translated))
-                time.sleep(1.5)
-            except Exception:
-                continue
-
-            for rel, en_block in generic_added.items():
-                lang_fpath = os.path.join(lang_dir, os.path.basename(rel))
-                if not os.path.exists(lang_fpath):
-                    continue
-                try:
-                    lhtml = open(lang_fpath, encoding='utf-8', errors='ignore').read()
-                    if GENERIC_MARKER in lhtml:
-                        continue
-                    tr_block = block_map.get(en_block, en_block)
-                    tr_div   = f'<div class="seo-extra">\n{tr_block}\n</div>'
-                    inserted = False
-                    for end_tag in ('</main>', '</article>', '</body>'):
-                        pos = lhtml.lower().rfind(end_tag)
-                        if pos >= 0:
-                            lhtml = lhtml[:pos] + tr_div + '\n' + lhtml[pos:]
-                            inserted = True
-                            break
-                    if not inserted:
-                        lhtml = lhtml + '\n' + tr_div
-                    with open(lang_fpath, 'w', encoding='utf-8') as f:
-                        f.write(lhtml)
-                except Exception:
-                    pass
 
 
 def _groq_call(groq_api_key: str, messages: list, max_tokens: int = 80,

@@ -754,7 +754,7 @@ function listenLogs(jobId, btn, btnText, domain) {
       es.close(); setProg(100); setTimeout(() => setProg(0), 900);
       document.getElementById('stop-btn').classList.add('hidden');
       _currentJobId = null;
-      const parts      = line.slice(5).split(':');
+      const parts      = line.slice(5).split('|');
       const pr         = parts[0].trim();
       const deployUrl  = parts[1] ? parts[1].trim() : '';
       const res = document.getElementById('result');
@@ -1183,7 +1183,7 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
         job['status'] = 'done'
         job['result'] = pr_url
         job['deployed'] = bool(deploy_url)
-        log_fn(f'DONE:{pr_url or ""}:{deploy_url}')
+        log_fn(f'DONE:{pr_url or ""}|{deploy_url}')
 
     except Exception as e:
         import traceback
