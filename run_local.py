@@ -53,7 +53,7 @@ SEO_STEPS = [
     ('Добавляю Schema.org (BreadcrumbList)...',      'fix_schema'),
     ('Добавляю OG images...',                        'fix_og_image'),
     ('Добавляю внутренние ссылки...',               'fix_internal_links'),
-    ('Добавляю nofollow на внешние ссылки...',       'fix_nofollow'),
+    ('Удаляю внешние ссылки...',                       'fix_nofollow'),
     ('Генерирую robots.txt...',                      'fix_robots_txt'),
 ]
 TRANSLATE_STEPS = [

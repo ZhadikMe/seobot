@@ -96,7 +96,7 @@ ADMIN_PORT      — порт (по умолч. 8080)
 | 8 | `fix_schema` | Добавляет BreadcrumbList Schema.org (JSON-LD) |
 | 9 | `fix_og_image` | Добавляет og:image, og:title, og:url, og:type, og:site_name, og:locale |
 | 10 | `fix_internal_links` | Добавляет внутренние ссылки между страницами |
-| 11 | `fix_nofollow` | Добавляет `rel="nofollow"` на внешние ссылки |
+| 11 | `fix_nofollow` | Удаляет внешние `<a href="https://...">` ссылки (анкор остаётся текстом) |
 | 12 | `fix_robots_txt` | Генерирует/обновляет robots.txt с актуальным Sitemap URL |
 
 ### Шаги перевода
