@@ -714,6 +714,9 @@ async function startJob() {
   btnText.textContent = 'Выполняется...';
   setProg(10);
   _currentJobId = data.job_id;
+  localStorage.setItem('seo_last_job', JSON.stringify({
+    job_id: data.job_id, domain, output_target: selOutput, ts: Date.now()
+  }));
   document.getElementById('stop-btn').classList.remove('hidden');
   document.getElementById('stop-btn').disabled = false;
   document.getElementById('stop-btn').textContent = '⏹ Стоп и применить';
@@ -779,6 +782,13 @@ function listenLogs(jobId, btn, btnText, domain) {
       btn.disabled = false; btn.classList.remove('loading'); btnText.textContent = 'Попробовать снова';
       return;
     }
+    if (line.startsWith('DEPLOY_FAIL:')) {
+      const res = document.getElementById('result');
+      res.classList.remove('hidden');
+      res.className = 'res-banner fail';
+      res.innerHTML = `<span class="res-ico">❌</span><span class="res-txt">Деплой не удался — проверь лог выше</span>`;
+      return;
+    }
 
     let cls = '';
     if (/✅|Готово|PR:|завершён/i.test(line))           cls = 'ok';
@@ -820,32 +830,60 @@ async function checkActiveJob() {
   try {
     const resp = await fetch('/jobs/active');
     const jobs = await resp.json();
-    if (!jobs.length) return;
-    const job = jobs[0];
+    if (jobs.length) {
+      const job = jobs[0];
+      const btn     = document.getElementById('start-btn');
+      const btnText = document.getElementById('btn-text');
+      const logCard = document.getElementById('log-card');
+      logCard.classList.remove('hidden');
+      document.getElementById('log').innerHTML = '';
+      document.getElementById('log-dom').textContent = job.domain;
+      document.getElementById('log-dot').className = 'log-dot running';
+      document.getElementById('log-titl').textContent = 'Выполняется...';
+      setProg(10);
+      logCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      btn.disabled = true; btn.classList.add('loading');
+      btnText.textContent = 'Выполняется...';
+      _currentJobId = job.job_id;
+      const stopBtn = document.getElementById('stop-btn');
+      stopBtn.classList.remove('hidden');
+      stopBtn.disabled = false;
+      stopBtn.textContent = '⏹ Стоп и применить';
+      listenLogs(job.job_id, btn, btnText, job.domain);
+      return;
+    }
+    // Check localStorage for a recent finished job
+    const saved = localStorage.getItem('seo_last_job');
+    if (!saved) return;
+    let parsed; try { parsed = JSON.parse(saved); } catch { return; }
+    const age = (Date.now() - parsed.ts) / 1000 / 3600;
+    if (age > 12) return;  // older than 12h, ignore
+    const st = await fetch(`/jobs/${parsed.job_id}/status`);
+    if (!st.ok) return;
+    const info = await st.json();
+    if (info.status === 'running') return;  // already handled above
+    // Offer to replay logs from last run
+    const notice = document.createElement('div');
+    notice.style.cssText = 'background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px 16px;margin:16px 0;font-size:13px;color:#94a3b8;display:flex;align-items:center;gap:12px';
+    const ago = age < 1 ? `${Math.round(age*60)} мин назад` : `${age.toFixed(1)}ч назад`;
+    const statusIcon = info.status === 'error' ? '❌' : (info.deployed ? '🖥️' : '✅');
+    notice.innerHTML = `<span style="font-size:18px">${statusIcon}</span><span>Последний прогон: <strong>${parsed.domain}</strong> (${ago})</span><button onclick="replayJob('${parsed.job_id}','${parsed.domain}')" style="margin-left:auto;background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:13px">Просмотреть лог</button><button onclick="this.parentElement.remove()" style="background:transparent;color:#64748b;border:none;cursor:pointer;font-size:18px">×</button>`;
+    document.querySelector('.page').insertBefore(notice, document.querySelector('.page').firstChild);
+  } catch(e) { /* ignore */ }
+}
 
-    const btn     = document.getElementById('start-btn');
-    const btnText = document.getElementById('btn-text');
-    const logCard = document.getElementById('log-card');
-
-    logCard.classList.remove('hidden');
-    document.getElementById('log').innerHTML = '';
-    document.getElementById('log-dom').textContent = job.domain;
-    document.getElementById('log-dot').className = 'log-dot running';
-    document.getElementById('log-titl').textContent = 'Выполняется...';
-    setProg(10);
-    logCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-    btn.disabled = true; btn.classList.add('loading');
-    btnText.textContent = 'Выполняется...';
-
-    _currentJobId = job.job_id;
-    const stopBtn = document.getElementById('stop-btn');
-    stopBtn.classList.remove('hidden');
-    stopBtn.disabled = false;
-    stopBtn.textContent = '⏹ Стоп и применить';
-
-    listenLogs(job.job_id, btn, btnText, job.domain);
-  } catch(e) { /* no active jobs or server unavailable */ }
+function replayJob(jobId, domain) {
+  document.querySelector('[data-job-notice]')?.remove();
+  const btn     = document.getElementById('start-btn');
+  const btnText = document.getElementById('btn-text');
+  const logCard = document.getElementById('log-card');
+  logCard.classList.remove('hidden');
+  document.getElementById('log').innerHTML = '';
+  document.getElementById('log-dom').textContent = domain;
+  document.getElementById('log-dot').className = 'log-dot done';
+  document.getElementById('log-titl').textContent = 'Последний прогон';
+  logCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  listenLogs(jobId, btn, btnText, domain);
 }
 
 document.addEventListener('DOMContentLoaded', checkActiveJob);
@@ -1126,9 +1164,12 @@ def _pipeline_thread(job_id, source_type, source_value, tmp_dir,
 
         if do_deploy:
             log_fn('')
-            log_fn('🖥️ Деплою на сервер...')
+            log_fn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+            log_fn('🖥️ Фаза 3: деплой на сервер...')
             from deploy import deploy_to_server
             deploy_ok = deploy_to_server(site_dir, domain, log_fn=log_fn)
+            if not deploy_ok:
+                log_fn('DEPLOY_FAIL:')
 
         if do_github and repo:
             log_fn('')
@@ -1219,7 +1260,8 @@ def start():
     stop_event = threading.Event()
     _jobs[job_id] = {
         'status': 'running', 'log_history': [], 'result': None,
-        'stop_event': stop_event, 'domain': domain,
+        'stop_event': stop_event, 'domain': domain, 'deployed': False,
+        'output_target': output_target,
     }
 
     threading.Thread(
@@ -1281,6 +1323,18 @@ def active_jobs():
         if job['status'] == 'running'
     ]
     return jsonify(running)
+
+
+@app.route('/jobs/<job_id>/status')
+def job_status(job_id):
+    job = _jobs.get(job_id)
+    if not job:
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({
+        'status': job['status'],
+        'domain': job.get('domain', ''),
+        'deployed': job.get('deployed', False),
+    })
 
 
 if __name__ == '__main__':
