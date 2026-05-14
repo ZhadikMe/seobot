@@ -62,7 +62,7 @@ def run_audit_on_dir(site_dir: str) -> dict:
         else:
             t = title_m.group(1).strip()
             if len(t) > 65:
-                issues.append(f'⚠️ {rel}: title длинный ({len(t)} симв, норма ≤60)')
+                issues.append(f'⚠️ {rel}: title длинный ({len(t)} симв, норма ≤65)')
                 page_ok = False
             elif len(t) < 10:
                 issues.append(f'⚠️ {rel}: title слишком короткий ({len(t)} симв)')
@@ -82,8 +82,8 @@ def run_audit_on_dir(site_dir: str) -> dict:
             if len(d) > 160:
                 issues.append(f'⚠️ {rel}: description длинный ({len(d)} симв, норма ≤155)')
                 page_ok = False
-            elif effective_len < 50:
-                issues.append(f'⚠️ {rel}: description короткий ({len(d)} симв, норма ≥120)')
+            elif effective_len < 120:
+                issues.append(f'⚠️ {rel}: description короткий ({len(d)} симв, норма ≥140)')
                 page_ok = False
 
         # 3. H1 — exactly one
@@ -122,11 +122,11 @@ def run_audit_on_dir(site_dir: str) -> dict:
 
         # 8. Word count — with body fallback (many sites don't use <main>)
         word_count = _count_words(html)
-        if word_count < 200:
+        if word_count < 300:
             if word_count < 50:
                 issues.append(f'❌ {rel}: очень мало текста ({word_count} слов) — рекомендуется noindex')
             else:
-                issues.append(f'⚠️ {rel}: мало текста ({word_count} слов, норма ≥200)')
+                issues.append(f'⚠️ {rel}: мало текста ({word_count} слов, норма ≥300)')
             counts['thin_content'] += 1
             page_ok = False
 

@@ -214,8 +214,8 @@ def fix_descriptions(site_dir: str, groq_api_key: str = None):
             else:
                 # Fallback: trim if too long
                 html = re.sub(
-                    r'(<meta[^>]*name=["\']description["\'][^>]*content=")([^"]{156,})(")',
-                    lambda m: m.group(1) + (m.group(2)[:152].rsplit(' ', 1)[0] + '...') + m.group(3),
+                    r'(<meta[^>]*name=["\']description["\'][^>]*content=")([^"]{161,})(")',
+                    lambda m: m.group(1) + (m.group(2)[:157].rsplit(' ', 1)[0] + '...') + m.group(3),
                     html, flags=re.IGNORECASE
                 )
 
@@ -685,11 +685,29 @@ def fix_thin_content(site_dir: str, langs: list, groq_api_key: str = None) -> No
     SKIP = set(LANG_DIRS + ARCHIVE_DIRS + ['scripts', 'images', 'css', '.git', 'node_modules'])
     INTRO_MARKER = 'class="archive-intro"'
 
-    INTRO_EN = ('<p class="archive-intro">{site_name} publishes personal blog posts about music, '
-                'creativity, and daily life. Browse the entries below from this archive period — '
-                'each one a direct, intimate window into the artist\'s thoughts and experiences.</p>')
-    OUTRO_EN = ('<p class="archive-outro">Explore more posts in other archive sections, '
-                'or visit the main blog for the latest updates.</p>')
+    INTRO_EN = (
+        '<p class="archive-intro">{site_name} has been sharing personal stories, reflections, '
+        'and creative work for years. This archive brings together posts from a specific period, '
+        'giving readers a chance to explore past entries that continue to resonate. Each piece '
+        'captures a distinct moment — a thought, an experience, or a creative breakthrough — '
+        'preserved here exactly as it was written.</p>\n'
+        '<p class="archive-intro">Browse through the entries below to discover the range of '
+        'topics covered during this time. From behind-the-scenes looks at the creative process '
+        'to everyday observations and personal milestones, these posts offer an authentic, '
+        'unfiltered perspective. Whether you are a longtime reader returning to revisit favourite '
+        'entries or a newcomer discovering the archive for the first time, there is something '
+        'here worth reading.</p>\n'
+        '<p class="archive-intro">The posts in this section represent a genuine record of ideas '
+        'and experiences. No content has been altered or updated — what you see below is the '
+        'original writing, preserved as a snapshot of a particular chapter in '
+        '{site_name}\'s story.</p>'
+    )
+    OUTRO_EN = (
+        '<p class="archive-outro">To continue exploring, visit other archive sections or head '
+        'to the main page for the latest updates. Each period in the archive tells its own '
+        'story, and together they form a complete picture of the journey documented here. '
+        'Thank you for taking the time to read.</p>'
+    )
 
     pages_added = {}  # rel → (intro_text, outro_text)
 
@@ -705,7 +723,7 @@ def fix_thin_content(site_dir: str, langs: list, groq_api_key: str = None) -> No
             if INTRO_MARKER in html:
                 continue
 
-            if _count_words(html) >= 200:
+            if _count_words(html) >= 300:
                 continue
 
             title_m   = re.search(r'<title>([^<]+)</title>', html)
@@ -866,7 +884,7 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
     # Check if description already exists and is good
     desc_m = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content="([^"]+)"', html, re.IGNORECASE)
     existing = desc_m.group(1).strip() if desc_m else ''
-    if existing and 50 <= len(existing) <= 155:
+    if existing and 120 <= len(existing) <= 160:
         return None  # Already fine — skip Groq call
 
     # Extract main keyword from title
@@ -879,7 +897,7 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
     prompt = (
         f'Write a compelling meta description for this webpage.\n'
         f'Requirements:\n'
-        f'- Length: 120-155 characters (count carefully)\n'
+        f'- Length: 140-160 characters (count carefully)\n'
         f'- Naturally include this keyword: "{main_keyword}"\n'
         f'- End with a call-to-action (e.g. "Learn more", "Find out", "Discover")\n'
         f'- No quotes, no markdown, no bullet points — plain text only\n\n'
@@ -895,14 +913,65 @@ def _generate_description(html: str, groq_api_key: str) -> str | None:
         return None
     if len(result) < 50:
         return None
-    if len(result) > 155:
-        result = result[:152].rsplit(' ', 1)[0].rstrip('.,;') + '...'
+    if len(result) > 160:
+        result = result[:157].rsplit(' ', 1)[0].rstrip('.,;') + '...'
 
     return result
 
 
+def _build_article_schema(html: str, base_url: str) -> str | None:
+    """
+    Build a minimal Article JSON-LD for a page if it looks like content (has <article> tag
+    and an H1). Returns the <script> block string, or None if not applicable.
+    """
+    import datetime
+    # Must have <article> tag to qualify as an article page
+    if not re.search(r'<article[\s>]', html, re.IGNORECASE):
+        return None
+    # Must have H1
+    h1_m = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.IGNORECASE | re.DOTALL)
+    if not h1_m:
+        return None
+    headline = re.sub(r'<[^>]+>', '', h1_m.group(1)).strip()
+    headline = headline.replace('"', '\\"')[:110]  # schema headline max ~110 chars
+    if not headline:
+        return None
+
+    # Detect language from <html lang="...">
+    lang_m = re.search(r'<html[^>]*\blang=["\']([a-z]{2})', html, re.IGNORECASE)
+    in_language = lang_m.group(1).lower() if lang_m else 'en'
+
+    # Get canonical URL for mainEntityOfPage
+    canon_m = re.search(r'<link[^>]*rel=["\']canonical["\'][^>]*href=["\']([^"\']+)["\']',
+                        html, re.IGNORECASE)
+    page_url = canon_m.group(1) if canon_m else None
+
+    from urllib.parse import urlparse
+    site_name = urlparse(base_url).netloc.lstrip('www.') if base_url else base_url
+    date_modified = datetime.date.today().isoformat()
+
+    parts = [
+        f'"@context":"https://schema.org"',
+        f'"@type":"Article"',
+        f'"headline":"{headline}"',
+        f'"dateModified":"{date_modified}"',
+        f'"inLanguage":"{in_language}"',
+    ]
+    if page_url:
+        parts.append(f'"mainEntityOfPage":{{"@type":"WebPage","@id":"{page_url}"}}')
+    parts.append(
+        f'"publisher":{{"@type":"Organization","name":"{site_name}","url":"{base_url}"}}'
+    )
+
+    return (
+        '\n<script type="application/ld+json">\n'
+        '{' + ','.join(parts) + '}\n'
+        '</script>'
+    )
+
+
 def fix_schema(site_dir: str, site_domain: str = None):
-    """Add BreadcrumbList schema to pages that don't have it."""
+    """Add BreadcrumbList (all pages) and Article schema (article pages) where missing."""
     BASE_URL = _detect_base_url(site_dir, site_domain)
     is_placeholder = (BASE_URL == 'https://example.com')
 
@@ -916,73 +985,78 @@ def fix_schema(site_dir: str, site_domain: str = None):
             with open(fpath, encoding='utf-8', errors='ignore') as f:
                 html = f.read()
 
-            if 'BreadcrumbList' in html:
-                if is_placeholder:
-                    continue
-                # Replace any wrong domain in existing BreadcrumbList JSON-LD
-                changed = False
-                def _fix_schema_domain(m):
-                    nonlocal changed
-                    block = m.group(0)
-                    # Replace any https://... domain that isn't the correct one
-                    fixed = re.sub(
-                        r'https://(?!schema\.org)[^/\\"]+',
-                        lambda dm: BASE_URL if dm.group(0) != BASE_URL else dm.group(0),
-                        block
-                    )
-                    if fixed != block:
-                        changed = True
-                    return fixed
-                html = re.sub(
-                    r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>.*?</script>',
-                    _fix_schema_domain, html, flags=re.DOTALL
-                )
-                if changed:
-                    with open(fpath, 'w', encoding='utf-8') as f:
-                        f.write(html)
-                continue
-
             if re.search(r'noindex', html):
                 continue
 
-            rel = fpath.replace(site_dir, '').replace(os.sep, '/').lstrip('/')
-            page_path = '/' + rel.replace('index.html', '').rstrip('/')
+            changed = False
 
-            parts = [p for p in page_path.strip('/').split('/') if p]
-            items = [{'pos': 1, 'name': 'Home', 'url': BASE_URL + '/'}]
-            for i, part in enumerate(parts[:-1], 2):
-                items.append({
-                    'pos': i,
-                    'name': part.replace('-', ' ').title(),
-                    'url': BASE_URL + '/' + '/'.join(parts[:i-1]) + '/'
-                })
-
-            title_m = re.search(r'<title>([^<]+)</title>', html)
-            page_name = title_m.group(1).split('—')[0].strip() if title_m else parts[-1] if parts else 'Home'
-            items.append({'pos': len(items) + 1, 'name': page_name})
-
-            list_items = []
-            for item in items:
-                if 'url' in item:
-                    list_items.append(
-                        f'{{"@type":"ListItem","position":{item["pos"]},'
-                        f'"name":"{item["name"]}","item":"{item["url"]}"}}'
+            # ── BreadcrumbList ────────────────────────────────────────────────
+            if 'BreadcrumbList' in html:
+                if not is_placeholder:
+                    # Fix wrong domain in existing BreadcrumbList JSON-LD
+                    def _fix_schema_domain(m):
+                        nonlocal changed
+                        block = m.group(0)
+                        fixed = re.sub(
+                            r'https://(?!schema\.org)[^/\\"]+',
+                            lambda dm: BASE_URL if dm.group(0) != BASE_URL else dm.group(0),
+                            block
+                        )
+                        if fixed != block:
+                            changed = True
+                        return fixed
+                    html = re.sub(
+                        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>.*?</script>',
+                        _fix_schema_domain, html, flags=re.DOTALL
                     )
-                else:
-                    list_items.append(
-                        f'{{"@type":"ListItem","position":{item["pos"]},"name":"{item["name"]}"}}'
-                    )
+            else:
+                rel = fpath.replace(site_dir, '').replace(os.sep, '/').lstrip('/')
+                page_path = '/' + rel.replace('index.html', '').rstrip('/')
 
-            schema = (
-                '\n<script type="application/ld+json">\n'
-                '{"@context":"https://schema.org","@type":"BreadcrumbList",'
-                '"itemListElement":[' + ','.join(list_items) + ']}\n'
-                '</script>'
-            )
+                parts = [p for p in page_path.strip('/').split('/') if p]
+                items = [{'pos': 1, 'name': 'Home', 'url': BASE_URL + '/'}]
+                for i, part in enumerate(parts[:-1], 2):
+                    items.append({
+                        'pos': i,
+                        'name': part.replace('-', ' ').title(),
+                        'url': BASE_URL + '/' + '/'.join(parts[:i-1]) + '/'
+                    })
 
-            html = html.replace('</head>', schema + '\n</head>', 1)
-            with open(fpath, 'w', encoding='utf-8') as f:
-                f.write(html)
+                title_m = re.search(r'<title>([^<]+)</title>', html)
+                page_name = title_m.group(1).split('—')[0].strip() if title_m else parts[-1] if parts else 'Home'
+                items.append({'pos': len(items) + 1, 'name': page_name})
+
+                list_items = []
+                for item in items:
+                    if 'url' in item:
+                        list_items.append(
+                            f'{{"@type":"ListItem","position":{item["pos"]},'
+                            f'"name":"{item["name"]}","item":"{item["url"]}"}}'
+                        )
+                    else:
+                        list_items.append(
+                            f'{{"@type":"ListItem","position":{item["pos"]},"name":"{item["name"]}"}}'
+                        )
+
+                breadcrumb = (
+                    '\n<script type="application/ld+json">\n'
+                    '{"@context":"https://schema.org","@type":"BreadcrumbList",'
+                    '"itemListElement":[' + ','.join(list_items) + ']}\n'
+                    '</script>'
+                )
+                html = html.replace('</head>', breadcrumb + '\n</head>', 1)
+                changed = True
+
+            # ── Article schema (only for pages with <article> tag) ────────────
+            if '"@type":"Article"' not in html and "'@type':'Article'" not in html:
+                article_schema = _build_article_schema(html, BASE_URL)
+                if article_schema:
+                    html = html.replace('</head>', article_schema + '\n</head>', 1)
+                    changed = True
+
+            if changed:
+                with open(fpath, 'w', encoding='utf-8') as f:
+                    f.write(html)
 
 
 def fix_canonical(site_dir: str, site_domain: str = None):
@@ -1366,6 +1440,10 @@ def fix_sitemap(site_dir: str, langs: list, site_domain: str = None) -> None:
             if not fname.endswith('.html'):
                 continue
             fpath = os.path.join(root, fname)
+            with open(fpath, encoding='utf-8', errors='ignore') as _f:
+                _html = _f.read()
+            if re.search(r'<meta[^>]*name=["\']robots["\'][^>]*noindex', _html, re.IGNORECASE):
+                continue  # noindex pages must not appear in sitemap
             rel = os.path.relpath(fpath, site_dir).replace(os.sep, '/')
             # Compute clean URL path (strip index.html)
             clean = rel[:-len('index.html')] if rel.endswith('index.html') else rel
@@ -1417,6 +1495,8 @@ def fix_robots_txt(site_dir: str, site_domain: str = None):
     _FRESH = (
         'User-agent: *\n'
         'Allow: /\n'
+        'Disallow: /wp-admin/\n'
+        'Disallow: /wp-login.php\n'
         '\n'
         f'Sitemap: {sitemap_url}\n'
     )
@@ -1449,11 +1529,35 @@ def fix_robots_txt(site_dir: str, site_domain: str = None):
         f.write(content)
 
 
+def _translation_similarity(html_a: str, html_b: str) -> float:
+    """
+    Jaccard similarity of Latin content words between two HTML pages (strips nav/footer/head).
+    Returns a high value (~0.7+) when translation failed and page stayed in source language.
+    Returns low value (~0.0-0.3) for successfully translated pages (different language words).
+    """
+    def _content_words(html):
+        text = re.sub(r'<head[^>]*>.*?</head>', '', html, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(
+            r'<(nav|footer|aside|script|style|header)[^>]*>.*?</(nav|footer|aside|script|style|header)>',
+            '', text, flags=re.DOTALL | re.IGNORECASE
+        )
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()[:4000]
+        return set(w.lower() for w in re.findall(r'\b[a-zA-Z]{3,}\b', text))
+
+    words_a = _content_words(html_a)
+    words_b = _content_words(html_b)
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
 def fix_hreflang_translated(site_dir: str, langs: list, site_domain: str = None,
                             source_lang: str = 'en'):
     """
     Add hreflang tags to translated pages that are missing them.
     Mirrors the hreflang block from the corresponding source page.
+    Skips pages where translation appears to have failed (text too similar to source).
     """
     if not langs:
         return
@@ -1487,6 +1591,10 @@ def fix_hreflang_translated(site_dir: str, langs: list, site_domain: str = None,
 
                 with open(source_path, encoding='utf-8', errors='ignore') as f:
                     source_html = f.read()
+
+                # Skip if translation failed (page text too similar to source = not translated)
+                if _translation_similarity(html, source_html) > 0.65:
+                    continue
 
                 # Extract hreflang block from source
                 hreflang_tags = re.findall(
